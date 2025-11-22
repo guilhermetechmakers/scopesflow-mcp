@@ -1,0 +1,53 @@
+# Exclude unnecessary files from Netlify deployment
+
+# Development files
+node_modules/
+*.log
+*.tsbuildinfo
+
+# Source files (only compiled dist is needed)
+*.ts
+!netlify/functions/**/*.ts
+
+# Documentation (not needed for runtime)
+*.md
+!NETLIFY_DEPLOYMENT.md
+
+# Test files
+**/*.test.ts
+**/*.spec.ts
+test/
+tests/
+
+# Cursor projects (large, not needed for function)
+cursor-projects/
+
+# Backup files
+*.backup
+*.bak
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git files
+.git/
+.gitignore
+
+# Environment files (use Netlify Dashboard for env vars)
+.env
+.env.local
+.env.*.local
+
+# Build artifacts (will be rebuilt)
+dist/cursor-projects/
+
+# Install scripts
+install-script.sh
+install.ps1
+
+# Test scripts
+test-timeout-fallback.js
+

@@ -1,0 +1,35 @@
+[build]
+  # Build command - compile TypeScript before deploying
+  command = "npm run build"
+  # Publish directory (not needed for serverless functions, but required by Netlify)
+  publish = "dist"
+
+[functions]
+  # Directory where Netlify Functions are located
+  directory = "netlify/functions"
+  # Node.js runtime version
+  node_bundler = "esbuild"
+  # Include compiled server code and dependencies
+  included_files = ["dist/**/*", "node_modules/@modelcontextprotocol/**/*"]
+
+[build.environment]
+  # Node.js version
+  NODE_VERSION = "20"
+  # TypeScript compilation
+  NPM_FLAGS = "--legacy-peer-deps"
+
+# Function-specific configuration
+[[functions]]
+  # Function name matches the file name (mcp.ts -> /.netlify/functions/mcp)
+  # Timeout in seconds (max 26s for paid, 10s for free tier)
+  timeout = 26
+  # Memory allocation (in MB, max 3008 for paid tier)
+  memory = 1024
+
+# Redirects (optional - for API routing)
+[[redirects]]
+  from = "/api/mcp"
+  to = "/.netlify/functions/mcp"
+  status = 200
+  force = true
+

@@ -1,0 +1,1946 @@
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as dotenv from 'dotenv';
+import { WebSocketServer } from 'ws';
+
+// Load environment variables (optional now, not required for Cursor CLI)
+dotenv.config();
+
+const execAsync = promisify(exec);
+
+interface CursorProjectConfig {
+  projectName: string;
+  projectPath: string;
+  framework: string;
+  packageManager: string;
+  template?: string;
+  gitRepository?: string;
+  gitHubToken?: string;      // NEW
+  gitUserName?: string;      // NEW
+  gitUserEmail?: string;     // NEW\n  gitRepository?: string;    // NEW
+}
+
+interface ExecutePromptArgs {
+  prompt: string;
+  projectPath: string;
+  timeout?: number;
+  context?: string;
+  files?: string[];
+  gitHubToken?: string;      // NEW
+  gitUserName?: string;      // NEW
+  gitUserEmail?: string;     // NEW
+  gitRepository?: string;    // NEW
+}
+interface ProjectPathArgs {
+  projectPath: string;
+}
+
+interface GetFilesArgs {
+  projectPath: string;
+  pattern?: string;
+}
+
+class CursorMCPServer {
+  private server: Server;
+  private wss: WebSocketServer | null = null;
+  private toolHandlers: Map<string, (args: any) => Promise<any>> = new Map();
+  private cursorAgentAvailable: boolean = false;
+
+  constructor() {
+    this.server = new Server(
+      {
+        name: 'scopesflow-cursor',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    this.setupToolHandlers();
+    this.checkCursorAgent();
+  }
+
+  private async checkCursorAgent() {
+    try {
+      // Check if running on Windows with WSL
+      const isWindows = process.platform === 'win32';
+      const command = isWindows 
+        ? 'wsl -d Ubuntu bash -c "~/.local/bin/cursor-agent --version"'
+        : 'cursor-agent --version';
+      
+      const { stdout } = await execAsync(command);
+      this.cursorAgentAvailable = true;
+      console.log(`[MCP Server] ✓ Cursor Agent CLI detected and available (version: ${stdout.trim()})`);
+    } catch (error) {
+      this.cursorAgentAvailable = false;
+      console.warn('[MCP Server] ⚠ Cursor Agent CLI not found.');
+      if (process.platform === 'win32') {
+        console.warn('[MCP Server] Install with: wsl -d Ubuntu bash -c "curl https://cursor.com/install -fsS | bash"');
+      } else {
+        console.warn('[MCP Server] Install with: curl https://cursor.com/install -fsS | bash');
+      }
+      console.warn('[MCP Server] Code generation will use fallback mode.');
+    }
+  }
+
+  private async readBoilerplateFile(filename: string): Promise<string> {
+    try {
+      const filePath = path.join(process.cwd(), filename);
+      const content = await fs.readFile(filePath, 'utf-8');
+      return content;
+    } catch (error) {
+      console.warn(`[MCP Server] Could not read ${filename}, using fallback`);
+      return '';
+    }
+  }
+
+  private setupToolHandlers() {
+    // List available tools
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+      return {
+        tools: [
+          {
+            name: 'cursor/create-project',
+            description: 'Create a new Cursor project',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Project name' },
+                path: { type: 'string', description: 'Project path' },
+                framework: { type: 'string', description: 'Framework to use' },
+                packageManager: { type: 'string', description: 'Package manager' },
+                template: { type: 'string', description: 'Project template' },
+                gitRepository: { type: 'string', description: 'Git repository URL' },
+                gitHubToken: { type: 'string', description: 'GitHub OAuth token for authentication' },
+                gitUserName: { type: 'string', description: 'Git user name for commits' },
+                gitUserEmail: { type: 'string', description: 'Git user email for commits' }
+              },
+              required: ['name', 'path', 'framework', 'packageManager']
+            }
+          },
+          {
+            name: 'cursor/execute-prompt',
+            description: 'Execute a prompt in Cursor',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                prompt: { type: 'string', description: 'The prompt to execute' },
+                projectPath: { type: 'string', description: 'Path to the project' },
+                timeout: { type: 'number', description: 'Timeout in milliseconds' },
+                context: { type: 'string', description: 'Additional context' },
+                files: { type: 'array', items: { type: 'string' }, description: 'Specific files to focus on' },
+                gitHubToken: { type: 'string', description: 'GitHub OAuth token for auto-commit' },
+                gitUserName: { type: 'string', description: 'Git user name for commits' },
+                gitUserEmail: { type: 'string', description: 'Git user email for commits' }
+              },
+              required: ['prompt', 'projectPath']
+            }
+          },
+          {
+            name: 'cursor/get-project-state',
+            description: 'Get current project state',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                projectPath: { type: 'string', description: 'Path to the project' }
+              },
+              required: ['projectPath']
+            }
+          },
+          {
+            name: 'cursor/build-project',
+            description: 'Build the project',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                projectPath: { type: 'string', description: 'Path to the project' }
+              },
+              required: ['projectPath']
+            }
+          },
+          {
+            name: 'cursor/run-tests',
+            description: 'Run tests in the project',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                projectPath: { type: 'string', description: 'Path to the project' }
+              },
+              required: ['projectPath']
+            }
+          },
+          {
+            name: 'cursor/check-project',
+            description: 'Check if project exists',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                projectPath: { type: 'string', description: 'Path to the project' }
+              },
+              required: ['projectPath']
+            }
+          },
+          {
+            name: 'cursor/get-files',
+            description: 'Get list of files in project',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                projectPath: { type: 'string', description: 'Path to the project' },
+                pattern: { type: 'string', description: 'File pattern to match' }
+              },
+              required: ['projectPath']
+            }
+          },
+          {
+            name: 'cursor/server-info',
+            description: 'Get server information',
+            inputSchema: {
+              type: 'object',
+              properties: {}
+            }
+          }
+        ]
+      };
+    });
+
+    // Handle tool calls
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+
+      try {
+        if (!args) {
+          throw new Error('No arguments provided');
+        }
+
+        switch (name) {
+          case 'cursor/create-project':
+            return await this.createProject(this.validateCreateProjectArgs(args));
+          
+          case 'cursor/execute-prompt':
+            return await this.executePrompt(this.validateExecutePromptArgs(args));
+          
+          case 'cursor/get-project-state':
+            return await this.getProjectState(this.validateProjectPathArgs(args));
+          
+          case 'cursor/build-project':
+            return await this.buildProject(this.validateProjectPathArgs(args));
+          
+          case 'cursor/run-tests':
+            return await this.runTests(this.validateProjectPathArgs(args));
+          
+          case 'cursor/check-project':
+            return await this.checkProject(this.validateProjectPathArgs(args));
+          
+          case 'cursor/get-files':
+            return await this.getFiles(this.validateGetFilesArgs(args));
+          
+          case 'cursor/server-info':
+            return await this.getServerInfo();
+          
+          default:
+            throw new Error(`Unknown tool: ${name}`);
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error'
+              })
+            }
+          ]
+        };
+      }
+    });
+
+    // Store tool handlers for WebSocket processing
+    this.toolHandlers.set('cursor/create-project', this.createProject.bind(this));
+    this.toolHandlers.set('cursor/execute-prompt', this.executePrompt.bind(this));
+    this.toolHandlers.set('cursor/get-project-state', this.getProjectState.bind(this));
+    this.toolHandlers.set('cursor/build-project', this.buildProject.bind(this));
+    this.toolHandlers.set('cursor/run-tests', this.runTests.bind(this));
+    this.toolHandlers.set('cursor/check-project', this.checkProject.bind(this));
+    this.toolHandlers.set('cursor/get-files', this.getFiles.bind(this));
+    this.toolHandlers.set('cursor/server-info', this.getServerInfo.bind(this));
+  }
+
+  // Validation methods with DEBUG LOGGING
+  private validateCreateProjectArgs(args: Record<string, unknown>): CursorProjectConfig {
+    console.log('[MCP Server] validateCreateProjectArgs received:', args);
+    
+    const { name, path, framework, packageManager, template, gitRepository, gitHubToken, gitUserName, gitUserEmail } = args;
+    
+    console.log('[MCP Server] Extracted values:', { name, path, framework, packageManager, template, gitRepository, gitHubToken, gitUserName, gitUserEmail });
+    
+    if (typeof name !== 'string') throw new Error('Project name must be a string');
+    if (typeof path !== 'string') throw new Error('Project path must be a string');
+    if (typeof framework !== 'string') throw new Error('Framework must be a string');
+    if (typeof packageManager !== 'string') throw new Error('Package manager must be a string');
+    
+    const result = {
+      projectName: name,
+      projectPath: path,
+      framework,
+      packageManager,
+      template: typeof template === 'string' ? template : undefined,
+      gitRepository: typeof gitRepository === 'string' ? gitRepository : undefined,
+      gitHubToken: typeof gitHubToken === 'string' ? gitHubToken : undefined,
+      gitUserName: typeof gitUserName === 'string' ? gitUserName : undefined,
+      gitUserEmail: typeof gitUserEmail === 'string' ? gitUserEmail : undefined
+    };
+    
+    console.log('[MCP Server] validateCreateProjectArgs result:', result);
+    return result;
+  }
+
+  private validateExecutePromptArgs(args: Record<string, unknown>): ExecutePromptArgs {
+    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository } = args;
+    
+    if (typeof prompt !== 'string') throw new Error('Prompt must be a string');
+    if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
+    
+    return {
+      prompt,
+      projectPath,
+      timeout: typeof timeout === 'number' ? timeout : undefined,
+      context: typeof context === 'string' ? context : undefined,
+      files: Array.isArray(files) ? files.filter(f => typeof f === 'string') : undefined,
+      gitHubToken: typeof gitHubToken === 'string' ? gitHubToken : undefined,
+      gitUserName: typeof gitUserName === 'string' ? gitUserName : undefined,
+      gitUserEmail: typeof gitUserEmail === 'string' ? gitUserEmail : undefined,
+      gitUserEmail: typeof gitUserEmail === 'string' ? gitUserEmail : undefined,
+      gitRepository: typeof gitRepository === 'string' ? gitRepository : undefined
+    };
+  }
+
+  private validateProjectPathArgs(args: Record<string, unknown>): ProjectPathArgs {
+    const { projectPath } = args;
+
+    if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
+
+    return { projectPath };
+  private validateGetFilesArgs(args: Record<string, unknown>): GetFilesArgs {
+    const { projectPath, pattern } = args;
+    
+    if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
+    
+    return {
+      projectPath,
+      pattern: typeof pattern === 'string' ? pattern : undefined
+    };
+  }
+
+  // REAL CURSOR CLI INTEGRATION - FIXED PROJECT CREATION
+  private async createProject(config: CursorProjectConfig) {
+    const startTime = Date.now();
+    
+    try {
+      console.log(`[MCP Server] Creating project: ${config.projectName} at ${config.projectPath}`);
+      
+      // Validate project path
+      if (!config.projectPath || typeof config.projectPath !== 'string') {
+        throw new Error('Project path is required and must be a string');
+      }
+      
+      // Ensure the parent directory exists
+      const parentDir = path.dirname(config.projectPath);
+      await fs.mkdir(parentDir, { recursive: true });
+      
+      // Create project directory
+      await fs.mkdir(config.projectPath, { recursive: true });
+      
+      // Initialize project based on framework
+      let initCommand = '';
+      const projectName = path.basename(config.projectPath);
+      
+      switch (config.framework) {
+        case 'react':
+          initCommand = `npx create-react-app "${projectName}" --template typescript`;
+          break;
+        case 'vite':
+          initCommand = `npm create vite@latest "${projectName}" -- --template react-ts`;
+          break;
+        case 'nextjs':
+          initCommand = `npx create-next-app@latest "${projectName}" --typescript --tailwind --eslint`;
+          break;
+        case 'vue':
+          initCommand = `npm create vue@latest "${projectName}"`;
+          break;
+        default:
+          // For default case, just create a basic project structure
+          const packageJsonPath = path.join(config.projectPath, 'package.json');
+          await fs.writeFile(packageJsonPath, JSON.stringify({
+            name: projectName,
+            version: '1.0.0',
+            description: '',
+            main: 'index.js',
+            scripts: {
+              test: 'echo "Error: no test specified" && exit 1'
+            },
+            keywords: [],
+            author: '',
+            license: 'ISC'
+          }, null, 2));
+      }
+
+      // Execute project creation from parent directory if using a framework
+      if (initCommand) {
+        const { stdout, stderr } = await execAsync(initCommand, {
+          cwd: parentDir,
+          timeout: 120000 // 2 minutes
+        });
+        console.log(`[MCP Server] Project creation output:`, stdout);
+      }
+
+      // Verify project was created
+      const projectExists = await fs.access(config.projectPath).then(() => true).catch(() => false);
+      if (!projectExists) {
+        throw new Error(`Project directory was not created at ${config.projectPath}`);
+      }
+
+      // Auto-commit initial project if GitHub token provided
+      if (config.gitHubToken) {
+        try {
+          console.log('[MCP Server] 🚀 Auto-committing initial project...');
+          const commitMessage = `Initial commit: ${config.projectName}\n\nProject created with ScopesFlow automation using ${config.framework} framework.`;
+          const result = await this.commitAndPush(
+            config.projectPath,
+            commitMessage,
+            config.gitHubToken,
+            config.gitUserName,
+            config.gitUserEmail,
+            config.gitRepository
+          );
+          
+          if (result.success) {
+            console.log(`[MCP Server] ✅ ${result.message}`);
+            if (result.changesCount && result.changesCount > 0) {
+              console.log(`[MCP Server] 📊 Committed ${result.changesCount} files`);
+            }
+          } else {
+            console.error(`[MCP Server] ❌ Initial commit failed: ${result.message}`);
+          }
+        } catch (commitError) {
+          console.error('[MCP Server] ❌ Failed to commit initial project:', commitError);
+          // Don't fail project creation, just log the error
+        }
+      }
+
+      // Create a basic README.md file to ensure the directory is properly initialized
+      const readmePath = path.join(config.projectPath, 'README.md');
+      await fs.writeFile(readmePath, `# ${config.projectName}\n\nThis project was created with ScopesFlow automation.\n`, 'utf-8');
+
+      // Validate and fix Tailwind v3 setup
+      try {
+        await this.validateAndFixTailwindV3(config.projectPath);
+        console.log(`[MCP Server] ✅ Tailwind v3 validation completed for ${config.projectName}`);
+      } catch (validationError) {
+        console.warn(`[MCP Server] ⚠️ Tailwind v3 validation failed for ${config.projectName}:`, validationError);
+        // Don't fail the entire operation, but log the issue
+      }
+
+      // Open project in Cursor (optional)
+      try {
+        await execAsync(`cursor "${config.projectPath}"`, { timeout: 10000 });
+      } catch (cursorError) {
+        console.warn('Failed to open in Cursor:', cursorError);
+        // Don't fail the entire operation if Cursor isn't available
+      }
+
+      console.log(`[MCP Server] Project created successfully at ${config.projectPath}`);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              output: `Project created successfully at ${config.projectPath}`,
+              error: null,
+              filesChanged: ['README.md'],
+              timeElapsed: Date.now() - startTime,
+              projectPath: config.projectPath  // Make sure this is included!
+            })
+          }
+        ]
+      };
+    } catch (error) {
+      console.error(`[MCP Server] Project creation failed:`, error);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              output: '',
+              error: error instanceof Error ? error.message : 'Unknown error',
+              filesChanged: [],
+              timeElapsed: Date.now() - startTime,
+              projectPath: config.projectPath  // Make sure this is included even on error!
+            })
+          }
+        ]
+      };
+    }
+  }
+
+  // CURSOR CLI INTEGRATION - Let Cursor handle the AI code generation!
+  private async executePrompt(args: ExecutePromptArgs) {
+    const startTime = Date.now();
+    
+    try {
+      console.log(`[MCP Server] ========================================`);
+      console.log(`[MCP Server] Executing prompt via Cursor CLI`);
+      console.log(`[MCP Server] Project: ${args.projectPath}`);
+      console.log(`[MCP Server] Prompt preview: ${args.prompt.substring(0, 200)}...`);
+      console.log(`[MCP Server] ========================================`);
+      
+      // Verify project directory exists
+      const projectExists = await fs.access(args.projectPath).then(() => true).catch(() => false);
+      if (!projectExists) {
+        throw new Error(`Project directory does not exist: ${args.projectPath}`);
+      }
+
+      // Check if Cursor Agent is available
+      if (!this.cursorAgentAvailable) {
+        console.warn('[MCP Server] Cursor Agent not available, using fallback task file method');
+        return await this.executePromptFallback(args, startTime);
+      }
+
+      // Execute prompt using Cursor Agent CLI
+      // The cursor-agent command will:
+      // 1. Analyze the project context
+      // 2. Use its own AI to generate code
+      // 3. Apply changes directly to the project
+      console.log(`[MCP Server] Calling cursor-agent CLI...`);
+      
+      // Build command based on platform
+      const isWindows = process.platform === 'win32';
+      let command: string;
+      let actualProjectPath = args.projectPath;
+      
+      // Resolve relative paths to absolute paths
+      if (!path.isAbsolute(args.projectPath)) {
+        actualProjectPath = path.resolve(process.cwd(), args.projectPath);
+        console.log(`[MCP Server] Resolved path: ${actualProjectPath}`);
+      }
+      
+      // Load boilerplate documentation
+      const reactBoilerplate = await this.readBoilerplateFile('REACT_BOILERPLATE.md');
+      const quickReference = await this.readBoilerplateFile('MODERN_STACK_QUICK_REFERENCE.md');
+      const testingGuide = await this.readBoilerplateFile('TESTING_GUIDE.md');
+      const apiLayerGuide = await this.readBoilerplateFile('API_LAYER_GUIDE.md');
+
+      // Build comprehensive directive prompt
+      let directivePrompt: string;
+      
+      if (reactBoilerplate && quickReference) {
+        // Use full boilerplate documentation
+        directivePrompt = `You are an expert full-stack developer proficient in TypeScript, React, Next.js, modern UI/UX frameworks, and Supabase.
+
+CRITICAL: Follow the boilerplate guidelines below EXACTLY. These are the official standards for this project.
+
+=== REACT BOILERPLATE DOCUMENTATION ===
+${reactBoilerplate}
+
+=== QUICK REFERENCE GUIDE ===
+${quickReference}
+
+=== TESTING GUIDE ===
+${testingGuide}
+
+=== API LAYER ARCHITECTURE ===
+${apiLayerGuide}
+
+=== PROJECT REQUIREMENTS ===
+${args.prompt}
+
+IMPLEMENTATION INSTRUCTIONS:
+1. Read and understand ALL boilerplate documentation above
+2. Follow the dependency versions EXACTLY as specified
+3. Use the project structure outlined in the documentation
+4. Implement the design system with CSS custom properties
+5. Set up testing infrastructure as documented
+6. Create the API layer following the architecture guide
+7. Use motion library (NOT framer-motion) for animations
+8. Use Sonner for toast notifications
+9. Implement the user's requirements: ${args.prompt}
+
+START IMPLEMENTING NOW. Do not ask questions - analyze the existing project and build according to the specifications above.`;
+      } else {
+        // Fallback prompt if boilerplate files can't be read
+        directivePrompt = `You are an expert full-stack developer proficient in TypeScript, React, Next.js, modern UI/UX frameworks, and Supabase.
+
+CRITICAL REQUIREMENTS:
+- React 18.3.1, React Router 6.30.1
+- Tailwind CSS v3 with tailwind.config.js
+- Motion library for animations (NOT framer-motion)
+- Sonner for toasts
+- Vitest for testing
+- API layer in src/api/
+- Design system with CSS custom properties
+- Use HSL color values for theming
+- Comprehensive Radix UI components
+- Testing setup with browser API mocks
+
+PROJECT REQUIREMENTS:
+${args.prompt}
+
+START IMPLEMENTING NOW. Do not ask questions - analyze the existing project and build according to the specifications above.`;
+      }
+      
+      if (isWindows) {
+        // Convert absolute Windows path to WSL path
+        const wslProjectPath = actualProjectPath
+          .replace(/\\/g, '/')
+          .replace(/^([A-Z]):/i, (match, drive) => `/mnt/${drive.toLowerCase()}`);
+        
+        console.log(`[MCP Server] WSL path: ${wslProjectPath}`);
+        
+        // Save prompt to a temporary file to avoid command-line length issues
+        const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
+        await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
+        
+        const wslPromptFile = wslProjectPath + '/.cursor-prompt.tmp';
+        
+        // Use --print flag for non-interactive mode, --force to allow commands
+        // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok
+        command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent --print --output-format text --force --model auto"`;
+      } else {
+        // Save prompt to file for Unix-like systems too
+        const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
+        await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
+        
+        command = `cat .cursor-prompt.tmp | cursor-agent --print --output-format text --force --model auto`;
+      }
+      
+      console.log(`[MCP Server] Executing cursor-agent in: ${actualProjectPath}`);
+      console.log(`[MCP Server] Original prompt length: ${args.prompt.length} characters`);
+      console.log(`[MCP Server] Directive prompt length: ${directivePrompt.length} characters`);
+      
+      let stdout = '';
+      let stderr = '';
+      
+      try {
+        const result = await execAsync(command, {
+          cwd: isWindows ? undefined : actualProjectPath,
+          timeout: args.timeout || 300000, // 5 minute default
+          maxBuffer: 10 * 1024 * 1024 // 10MB buffer
+        });
+        stdout = result.stdout;
+        stderr = result.stderr;
+      } catch (error: any) {
+        // cursor-agent often doesn't exit cleanly, causing timeout errors
+        // But the work is usually done, so we capture the output and continue
+        if (error.killed && error.signal === 'SIGTERM') {
+          console.log(`[MCP Server] ⚠ cursor-agent timed out but may have completed work`);
+          stdout = error.stdout || '';
+          stderr = error.stderr || '';
+        } else {
+          throw error;
+        }
+      }
+      
+      // Clean up temp file
+      try {
+        await fs.unlink(path.join(actualProjectPath, '.cursor-prompt.tmp'));
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+
+      console.log(`[MCP Server] ✓ Cursor Agent execution completed`);
+      console.log(`[MCP Server] Output length: ${stdout.length} characters`);
+      
+      if (stderr) {
+        console.warn(`[MCP Server] Stderr: ${stderr}`);
+      }
+
+      // Wait for file system changes to stabilize after cursor-agent execution
+      console.log(`[MCP Server] ⏳ Waiting for file system changes to stabilize...`);
+      await this.waitForFileSystemStability(actualProjectPath, 30000); // 30 second max wait
+      console.log(`[MCP Server] ✅ File system changes stabilized`);
+
+      // Get the files that were changed
+      const filesChanged = await this.getChangedFiles(actualProjectPath);
+      
+      console.log(`[MCP Server] ========================================`);
+      console.log(`[MCP Server] 📊 CURSOR AGENT RESULTS`);
+      console.log(`[MCP Server] ========================================`);
+      console.log(`[MCP Server] Total files changed: ${filesChanged.length}`);
+
+      if (filesChanged.length > 0) {
+        // Categorize files by type
+        const categorized = this.categorizeFiles(filesChanged);
+        
+        Object.entries(categorized).forEach(([category, files]) => {
+          if (files.length > 0) {
+            console.log(`[MCP Server] ${category}:`);
+            files.forEach(file => console.log(`[MCP Server]   ✓ ${file}`));
+          }
+        });
+      } else {
+        console.log(`[MCP Server] ⚠️ No files were changed`);
+      }
+      console.log(`[MCP Server] ========================================`);
+
+      // Validate Tailwind v3 compliance after AI code generation
+      try {
+        await this.validateAndFixTailwindV3(actualProjectPath);
+        console.log(`[MCP Server] ✅ Post-generation Tailwind v3 validation completed`);
+      } catch (validationError) {
+        console.warn(`[MCP Server] ⚠️ Post-generation Tailwind v3 validation failed:`, validationError);
+        // Don't fail the entire operation, but log the issue
+      }
+      
+      // Auto-commit changes if GitHub token provided
+      if (args.gitHubToken && filesChanged.length > 0) {
+        try {
+          console.log(`[MCP Server] 🚀 Auto-committing ${filesChanged.length} changed files...`);
+          
+          const commitMessage = `feat: AI-generated changes\n\n${args.prompt}`;
+          const result = await this.commitAndPush(
+            actualProjectPath,
+            commitMessage,
+            args.gitHubToken,
+            args.gitUserName,
+            args.gitUserEmail,
+            args.gitRepository
+          );
+          
+          if (result.success) {
+            console.log(`[MCP Server] ✅ ${result.message}`);
+            if (result.changesCount && result.changesCount > 0) {
+              console.log(`[MCP Server] 📊 Committed ${result.changesCount} files`);
+            }
+          } else {
+            console.error(`[MCP Server] ❌ Auto-commit failed: ${result.message}`);
+          }
+        } catch (commitError) {
+          console.error('[MCP Server] ❌ Auto-commit failed:', commitError);
+          // Don't fail the operation, just log the error and continue
+        }
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              output: `Cursor Agent executed successfully. Modified ${filesChanged.length} file(s).\n\n${stdout.substring(0, 500)}`,
+              error: null,
+              filesChanged: filesChanged,
+              timeElapsed: Date.now() - startTime,
+              cursorOutput: stdout
+            })
+          }
+        ]
+      };
+    } catch (error) {
+      console.error('[MCP Server] Cursor execution failed:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      
+      // If cursor-agent failed, try fallback method
+      if (errorMessage.includes('cursor-agent') || errorMessage.includes('not found')) {
+        console.log('[MCP Server] Falling back to task file method...');
+        return await this.executePromptFallback(args, startTime);
+      }
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              output: '',
+              error: errorMessage,
+              filesChanged: [],
+              timeElapsed: Date.now() - startTime
+            })
+          }
+        ]
+      };
+    }
+  }
+
+  // Get project structure for AI context (kept for future use)
+  private async getProjectStructure(projectPath: string): Promise<string> {
+    try {
+      const files = await this.getAllFiles(projectPath);
+      const structure = files.map(file => {
+        const relativePath = path.relative(projectPath, file);
+        return relativePath;
+      }).join('\n');
+      
+      return `Files in project:\n${structure}`;
+    } catch (error) {
+      return 'Unable to read project structure';
+    }
+  }
+
+  // Fallback prompt execution method (when cursor-agent is not available)
+  private async executePromptFallback(args: ExecutePromptArgs, startTime: number) {
+    try {
+      // Create a development task file that Cursor can process
+      console.log('[MCP Server] Using fallback mode - creating task file for manual processing');
+      
+      const taskFile = path.join(args.projectPath, 'CURSOR_TASK.md');
+      const timestamp = new Date().toISOString();
+      
+      const taskContent = `# Cursor Development Task
+**Created:** ${timestamp}
+**Status:** Pending
+
+## Task Description
+${args.prompt}
+
+## Context
+${args.context || 'No additional context provided'}
+
+## Files to Focus On
+${args.files?.join(', ') || 'All files in project'}
+
+## Instructions
+This task was created by ScopesFlow automation. To complete:
+1. Open this project in Cursor IDE
+2. Use Cursor's AI to implement the task described above
+3. Review and test the generated code
+4. Delete this file when complete
+`;
+      
+      await fs.writeFile(taskFile, taskContent, 'utf-8');
+      
+      console.log(`[MCP Server] ✓ Task file created: ${taskFile}`);
+      console.log(`[MCP Server] ⚠ Manual intervention required - open project in Cursor IDE`);
+      
+      const filesChanged = [path.relative(args.projectPath, taskFile)];
+      
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              output: `Task file created at ${taskFile}. Please open the project in Cursor IDE to complete the task manually.`,
+              error: null,
+              filesChanged,
+              timeElapsed: Date.now() - startTime,
+              requiresManualAction: true
+            })
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              output: '',
+              error: error instanceof Error ? error.message : 'Unknown error',
+              filesChanged: [],
+              timeElapsed: Date.now() - startTime
+            })
+          }
+        ]
+      };
+    }
+  }
+
+  // MISSING METHODS - ADD THESE
+  private async getProjectState(args: ProjectPathArgs) {
+    try {
+      // Check if project exists
+      const exists = await fs.access(args.projectPath).then(() => true).catch(() => false);
+      if (!exists) {
+        throw new Error('Project not found');
+      }
+
+      // Get project files
+      const files = await this.getAllFiles(args.projectPath);
+      
+      // Get dependencies
+      const dependencies = await this.getDependencies(args.projectPath);
+      
+      // Check build status
+      const buildStatus = await this.checkBuildStatus(args.projectPath);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: buildStatus,
+              lastModified: new Date().toISOString(),
+              files,
+              dependencies,
+              buildErrors: []
+            })
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: 'error',
+              lastModified: new Date().toISOString(),
+              files: [],
+              dependencies: [],
+              buildErrors: [error instanceof Error ? error.message : 'Unknown error']
+            })
+          }
+        ]
+      };
+    }
+  }
+
+  private async buildProject(args: ProjectPathArgs) {
+    const startTime = Date.now();
+    
+    try {
+      const { stdout, stderr } = await execAsync('npm run build', {
+        cwd: args.projectPath,
+        timeout: 120000 // 2 minutes
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              output: stdout,
+              error: stderr || null,
+              timeElapsed: Date.now() - startTime
+            })
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              output: '',
+              error: error instanceof Error ? error.message : 'Unknown error',
+              timeElapsed: Date.now() - startTime
+            })
+          }
+        ]
+      };
+    }
+  }
+
+  private async runTests(args: ProjectPathArgs) {
+    const startTime = Date.now();
+    
+    try {
+      const { stdout, stderr } = await execAsync('npm test', {
+        cwd: args.projectPath,
+        timeout: 180000 // 3 minutes
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: true,
+              output: stdout,
+              error: stderr || null,
+              timeElapsed: Date.now() - startTime
+            })
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              success: false,
+              output: '',
+              error: error instanceof Error ? error.message : 'Unknown error',
+              timeElapsed: Date.now() - startTime
+            })
+          }
+        ]
+      };
+    }
+  }
+
+  private async checkProject(args: ProjectPathArgs) {
+    try {
+      await fs.access(args.projectPath);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ exists: true })
+          }
+        ]
+      };
+    } catch {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ exists: false })
+          }
+        ]
+      };
+    }
+  }
+
+  private async getFiles(args: GetFilesArgs) {
+    try {
+      const files = await this.getAllFiles(args.projectPath);
+      const filteredFiles = args.pattern 
+        ? files.filter(file => file.includes(args.pattern!))
+        : files;
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ files: filteredFiles })
+          }
+        ]
+      };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ 
+              files: [],
+              error: error instanceof Error ? error.message : 'Unknown error'
+            })
+          }
+        ]
+      };
+    }
+  }
+
+  private async getServerInfo() {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            name: 'ScopesFlow Cursor MCP Server',
+            version: '1.0.0',
+            status: 'running',
+            capabilities: ['project-creation', 'prompt-execution', 'build-management'],
+            timestamp: new Date().toISOString()
+          })
+        }
+      ]
+    };
+  }
+
+  // Helper methods
+  private async getChangedFiles(projectPath: string): Promise<string[]> {
+    try {
+      console.log(`[MCP Server] 🔍 Checking git status in: ${projectPath}`);
+      const { stdout } = await execAsync('git status --porcelain', { cwd: projectPath });
+      
+      if (!stdout.trim()) {
+        console.log('[MCP Server] ℹ️ No changes detected by git');
+        return [];
+      }
+      
+      const files = stdout.trim().split('\n').filter(Boolean).map(line => {
+        const status = line.substring(0, 2);
+        const filepath = line.substring(3);
+        console.log(`[MCP Server]   ${status} ${filepath}`);
+        return filepath;
+      });
+      
+      console.log(`[MCP Server] ✅ Found ${files.length} changed file(s)`);
+      return files;
+    } catch (error) {
+      console.error('[MCP Server] ❌ Failed to get changed files:', error);
+      return [];
+    }
+  }
+
+  private async waitForFileSystemStability(
+    projectPath: string, 
+    maxWaitMs: number = 30000
+  ): Promise<void> {
+    const startTime = Date.now();
+    const pollInterval = 2000; // Check every 2 seconds
+    let previousChangeCount = -1;
+    let stableCount = 0;
+    const requiredStableChecks = 2; // Need 2 consecutive stable checks
+    
+    while (Date.now() - startTime < maxWaitMs) {
+      const files = await this.getChangedFiles(projectPath);
+      const currentChangeCount = files.length;
+      
+      console.log(`[MCP Server] 🔍 File system check: ${currentChangeCount} changed files`);
+      
+      if (currentChangeCount === previousChangeCount && currentChangeCount > 0) {
+        stableCount++;
+        if (stableCount >= requiredStableChecks) {
+          console.log(`[MCP Server] ✅ File system stable with ${currentChangeCount} changes`);
+          return;
+        }
+      } else {
+        stableCount = 0;
+      }
+      
+      previousChangeCount = currentChangeCount;
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+    }
+    
+    console.log(`[MCP Server] ⚠️ File system stability timeout after ${maxWaitMs}ms`);
+  }
+
+  private categorizeFiles(files: string[]): Record<string, string[]> {
+    const categories: Record<string, string[]> = {
+      'Source Files': [],
+      'Components': [],
+      'Styles': [],
+      'Config Files': [],
+      'Other': []
+    };
+    
+    files.forEach(file => {
+      if (file.match(/\.(tsx?|jsx?)$/)) {
+        if (file.includes('component')) {
+          categories['Components'].push(file);
+        } else {
+          categories['Source Files'].push(file);
+        }
+      } else if (file.match(/\.(css|scss|sass)$/)) {
+        categories['Styles'].push(file);
+      } else if (file.match(/\.(json|js|ts|config)$/) || file.includes('config')) {
+        categories['Config Files'].push(file);
+      } else {
+        categories['Other'].push(file);
+      }
+    });
+    
+    return categories;
+  }
+
+  private async commitAndPush(
+    projectPath: string,
+    commitMessage: string,
+    gitHubToken: string,
+    gitUserName?: string,
+    gitUserEmail?: string,
+    gitRepository?: string,
+    retryCount: number = 0
+  ): Promise<{ success: boolean; message: string; changesCount?: number }> {
+    try {
+      console.log('[MCP Server] 🔍 Starting git commit and push process...');
+      
+      // Ensure git repository is properly initialized
+      const gitStatus = await this.ensureGitRepository(projectPath, gitRepository, gitHubToken);
+      
+      if (!gitStatus.isInitialized) {
+        throw new Error('Failed to initialize git repository');
+      }
+
+      // Configure git user if provided
+      if (gitUserName && gitUserEmail) {
+        console.log('[MCP Server] Configuring git user...');
+        await execAsync(`git config user.name "${gitUserName}"`, { cwd: projectPath });
+        await execAsync(`git config user.email "${gitUserEmail}"`, { cwd: projectPath });
+        console.log('[MCP Server] ✅ Git user configured');
+      }
+      
+      // Final file system check before commit
+      console.log('[MCP Server] 🔍 Final file system check before commit...');
+      await this.waitForFileSystemStability(projectPath, 10000); // 10 second final check
+      console.log('[MCP Server] ✅ Pre-commit file system check complete');
+
+      // Check if there are changes to commit BEFORE staging
+      console.log('[MCP Server] Checking for changes to commit...');
+      const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: projectPath });
+      
+      if (!statusOutput.trim()) {
+        console.log('[MCP Server] ℹ️ No changes to commit - skipping commit process');
+        return { success: true, message: 'No changes to commit', changesCount: 0 };
+      }
+
+      // Count changes for logging
+      const changesCount = statusOutput.trim().split('\n').length;
+      console.log(`[MCP Server] 📝 Found ${changesCount} file(s) with changes`);
+      
+      // Stage all changes
+      console.log('[MCP Server] Staging changes...');
+      await execAsync('git add .', { cwd: projectPath });
+      console.log('[MCP Server] ✅ Changes staged');
+      
+      // Commit changes - truncate message to 20 characters to prevent Windows command line length errors
+      const truncatedMessage = commitMessage.substring(0, 20);
+      const escapedMessage = truncatedMessage.replace(/"/g, '\\"');
+      console.log('[MCP Server] Creating commit...');
+      await execAsync(`git commit -m "${escapedMessage}"`, { cwd: projectPath });
+      console.log('[MCP Server] ✅ Commit created');
+      
+      // Only attempt to push if remote exists
+      if (!gitStatus.hasRemote) {
+        console.log('[MCP Server] ⚠️ No remote repository configured - skipping push');
+        return { 
+          success: true, 
+          message: 'Commit created successfully, but no remote repository configured for push', 
+          changesCount 
+        };
+      }
+
+      // Get remote URL and authenticate
+      console.log('[MCP Server] Preparing to push to remote...');
+      const { stdout: remoteUrl } = await execAsync('git remote get-url origin', { cwd: projectPath });
+      const cleanUrl = remoteUrl.trim();
+      
+      if (cleanUrl.startsWith('https://')) {
+        const authenticatedUrl = cleanUrl.replace('https://', `https://${gitHubToken}@`);
+        await execAsync(`git remote set-url origin "${authenticatedUrl}"`, { cwd: projectPath });
+        console.log('[MCP Server] ✅ Remote URL authenticated');
+      }
+      
+      // Detect current branch name
+      console.log('[MCP Server] Detecting current branch...');
+      const { stdout: currentBranch } = await execAsync('git branch --show-current', { cwd: projectPath });
+      const branchName = currentBranch.trim() || 'main'; // fallback to 'main' if detection fails
+      console.log(`[MCP Server] Current branch: ${branchName}`);
+      
+      // Push to detected branch
+      console.log(`[MCP Server] Pushing to remote repository (${branchName})...`);
+      await execAsync(`git push -u origin ${branchName}`, { cwd: projectPath });
+      
+      console.log('[MCP Server] ✅ Successfully committed and pushed changes');
+      return { 
+        success: true, 
+        message: 'Successfully committed and pushed changes', 
+        changesCount 
+      };
+    } catch (error) {
+      console.error('[MCP Server] ❌ Git operation failed:', error);
+      
+      // Only retry on transient failures, not on permanent issues like "no changes"
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isTransientError = !errorMessage.includes('No changes to commit') && 
+                              !errorMessage.includes('Git repository initialization failed') &&
+                              !errorMessage.includes('no remote repository configured') &&
+                              !errorMessage.includes('src refspec') &&
+                              !errorMessage.includes('does not match any');
+      
+      if (retryCount < 1 && isTransientError) {
+        console.warn(`[MCP Server] ⚠️ Transient error detected, retrying... (attempt ${retryCount + 1}/2)`);
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+        return await this.commitAndPush(projectPath, commitMessage, gitHubToken, gitUserName, gitUserEmail, gitRepository, retryCount + 1);
+      } else {
+        const finalError = isTransientError ? 
+          `Commit/push failed after retry: ${errorMessage}` : 
+          `Commit/push failed: ${errorMessage}`;
+        console.error(`[MCP Server] ❌ ${finalError}`);
+        return { success: false, message: finalError };
+      }
+    }
+  }
+
+  private async getRemoteUrl(projectPath: string): Promise<string | null> {
+    try {
+      const { stdout } = await execAsync('git remote get-url origin', { cwd: projectPath });
+      return stdout.trim();
+    } catch {
+      return null;
+    }
+  }
+
+  private async ensureGitRepository(
+    projectPath: string,
+    gitRepository?: string,
+    gitHubToken?: string
+  ): Promise<{ isInitialized: boolean; hasRemote: boolean; remoteUrl?: string }> {
+    try {
+      // Check if .git directory exists
+      const gitDir = path.join(projectPath, '.git');
+      const gitExists = await fs.access(gitDir).then(() => true).catch(() => false);
+      
+      if (!gitExists) {
+        console.log('[MCP Server] Git repository not found, initializing...');
+        await execAsync('git init', { cwd: projectPath });
+        console.log('[MCP Server] ✅ Git repository initialized');
+      } else {
+        console.log('[MCP Server] Git repository already exists');
+      }
+
+      // Check if remote origin exists
+      let hasRemote = false;
+      let remoteUrl: string | undefined;
+      
+      try {
+        const { stdout: remoteUrlOutput } = await execAsync('git remote get-url origin', { cwd: projectPath });
+        remoteUrl = remoteUrlOutput.trim();
+        hasRemote = true;
+        console.log('[MCP Server] Remote origin found:', remoteUrl);
+      } catch {
+        console.log('[MCP Server] No remote origin found');
+        
+        // Set up remote if gitRepository is provided
+        if (gitRepository) {
+          await execAsync(`git remote add origin ${gitRepository}`, { cwd: projectPath });
+          hasRemote = true;
+          remoteUrl = gitRepository;
+          console.log('[MCP Server] ✅ Remote origin added:', gitRepository);
+        }
+      }
+
+      return {
+        isInitialized: true,
+        hasRemote,
+        remoteUrl
+      };
+    } catch (error) {
+      console.error('[MCP Server] ❌ Failed to ensure git repository:', error);
+      throw new Error(`Git repository initialization failed: ${error}`);
+    }
+  }
+
+  private async getAllFiles(dirPath: string): Promise<string[]> {
+    const files: string[] = [];
+    
+    async function traverse(currentPath: string) {
+      try {
+        const items = await fs.readdir(currentPath, { withFileTypes: true });
+        
+        for (const item of items) {
+          const fullPath = path.join(currentPath, item.name);
+          
+          if (item.isDirectory() && !item.name.startsWith('.') && item.name !== 'node_modules') {
+            await traverse(fullPath);
+          } else if (item.isFile()) {
+            files.push(path.relative(dirPath, fullPath));
+          }
+        }
+      } catch (error) {
+        console.warn(`Failed to traverse ${currentPath}:`, error);
+      }
+    }
+    
+    await traverse(dirPath);
+    return files;
+  }
+
+  private async getDependencies(projectPath: string): Promise<string[]> {
+    try {
+      const packageJsonPath = path.join(projectPath, 'package.json');
+      const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
+      
+      return [
+        ...Object.keys(packageJson.dependencies || {}),
+        ...Object.keys(packageJson.devDependencies || {})
+      ];
+    } catch {
+      return [];
+    }
+  }
+
+  private async checkBuildStatus(projectPath: string): Promise<string> {
+    try {
+      const buildPath = path.join(projectPath, 'build');
+      const distPath = path.join(projectPath, 'dist');
+      
+      const buildExists = await fs.access(buildPath).then(() => true).catch(() => false);
+      const distExists = await fs.access(distPath).then(() => true).catch(() => false);
+      
+      return (buildExists || distExists) ? 'ready' : 'idle';
+    } catch {
+      return 'idle';
+    }
+  }
+
+  // TAILWIND V3 VALIDATION METHODS
+  private async validateAndFixTailwindV3(projectPath: string): Promise<void> {
+    console.log('[MCP Server] 🔍 Validating Tailwind v3 setup...');
+    
+    try {
+      // 1. Check package.json
+      await this.validateTailwindV3Dependencies(projectPath);
+      
+      // 2. Validate and create config files
+      await this.validateTailwindConfig(projectPath);
+      await this.validatePostCSSConfig(projectPath);
+      
+      // 3. Validate and fix CSS
+      await this.validateAndFixV3CSS(projectPath);
+      
+      // 4. Validate vite.config.ts
+      await this.validateViteConfigV3(projectPath);
+      
+      console.log('[MCP Server] ✅ Tailwind v3 validation complete');
+    } catch (error) {
+      console.error('[MCP Server] ❌ Tailwind v3 validation failed:', error);
+      throw error;
+    }
+  }
+
+  private async validateTailwindV3Dependencies(projectPath: string): Promise<void> {
+    const packageJsonPath = path.join(projectPath, 'package.json');
+    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
+    
+    // Check for correct v3 dependencies
+    const hasTailwindV3 = packageJson.devDependencies?.['tailwindcss']?.includes('3');
+    const hasPostCSS = packageJson.devDependencies?.['postcss'];
+    const hasAutoprefixer = packageJson.devDependencies?.['autoprefixer'];
+    
+    if (!hasTailwindV3 || !hasPostCSS || !hasAutoprefixer) {
+      console.log('[MCP Server] ⚠️ Fixing Tailwind v3 dependencies...');
+      await this.fixTailwindV3Dependencies(projectPath);
+    } else {
+      console.log('[MCP Server] ✅ Tailwind v3 dependencies validated');
+    }
+  }
+
+  private async fixTailwindV3Dependencies(projectPath: string): Promise<void> {
+    const packageJsonPath = path.join(projectPath, 'package.json');
+    const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
+    
+    // Remove v4 dependencies
+    delete packageJson.devDependencies?.tailwindcss;
+    delete packageJson.devDependencies?.['@tailwindcss/postcss'];
+    delete packageJson.devDependencies?.['@tailwindcss/typography'];
+    delete packageJson.devDependencies?.['@tailwindcss/forms'];
+    
+    // Add correct v3 dependencies
+    packageJson.devDependencies = {
+      ...packageJson.devDependencies,
+      'tailwindcss': '^3.4.0',
+      'postcss': '^8.4.0',
+      'autoprefixer': '^10.4.0'
+    };
+    
+    await fs.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
+    
+    // Run npm install
+    await execAsync('npm install', { cwd: projectPath });
+    console.log('[MCP Server] ✅ Tailwind v3 dependencies installed');
+  }
+
+  private async validateTailwindConfig(projectPath: string): Promise<void> {
+    const configPath = path.join(projectPath, 'tailwind.config.js');
+    
+    try {
+      await fs.access(configPath);
+      console.log('[MCP Server] ✅ tailwind.config.js exists');
+    } catch {
+      console.log('[MCP Server] ⚠️ Creating tailwind.config.js...');
+      await this.createTailwindConfig(projectPath);
+    }
+  }
+
+  private async createTailwindConfig(projectPath: string): Promise<void> {
+    const configPath = path.join(projectPath, 'tailwind.config.js');
+    const configContent = `/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        primary: {
+          DEFAULT: '#3b82f6',
+          foreground: '#ffffff',
+        },
+        secondary: {
+          DEFAULT: '#64748b',
+          foreground: '#ffffff',
+        },
+        accent: {
+          DEFAULT: '#f59e0b',
+          foreground: '#ffffff',
+        },
+        background: '#ffffff',
+        foreground: '#1e293b',
+        card: {
+          DEFAULT: '#ffffff',
+          foreground: '#1e293b',
+        },
+        border: '#e2e8f0',
+        input: '#e2e8f0',
+        ring: '#3b82f6',
+      },
+      fontFamily: {
+        sans: ['Inter', 'sans-serif'],
+      },
+      borderRadius: {
+        lg: '0.75rem',
+      },
+      boxShadow: {
+        card: '0 2px 8px rgba(0, 0, 0, 0.1)',
+      },
+    },
+  },
+  plugins: [],
+}`;
+    
+    await fs.writeFile(configPath, configContent);
+    console.log('[MCP Server] ✅ tailwind.config.js created');
+  }
+
+  private async validatePostCSSConfig(projectPath: string): Promise<void> {
+    const configPath = path.join(projectPath, 'postcss.config.js');
+    
+    try {
+      await fs.access(configPath);
+      console.log('[MCP Server] ✅ postcss.config.js exists');
+    } catch {
+      console.log('[MCP Server] ⚠️ Creating postcss.config.js...');
+      await this.createPostCSSConfig(projectPath);
+    }
+  }
+
+  private async createPostCSSConfig(projectPath: string): Promise<void> {
+    const configPath = path.join(projectPath, 'postcss.config.js');
+    const configContent = `export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}`;
+    
+    await fs.writeFile(configPath, configContent);
+    console.log('[MCP Server] ✅ postcss.config.js created');
+  }
+
+  private async validateAndFixV3CSS(projectPath: string): Promise<void> {
+    const cssPath = path.join(projectPath, 'src/index.css');
+    let cssContent = await fs.readFile(cssPath, 'utf-8');
+    
+    // Check for v4 syntax and convert to v3
+    if (cssContent.includes('@import "tailwindcss"') || cssContent.includes('@theme')) {
+      console.log('[MCP Server] ⚠️ Converting CSS from v4 to v3 syntax...');
+      
+      // Replace v4 syntax with v3 syntax
+      cssContent = cssContent
+        .replace(/@import "tailwindcss";\s*/g, '')
+        .replace(/@theme\s*\{[^}]*\}/g, '');
+      
+      // Ensure v3 directives are present
+      if (!cssContent.includes('@tailwind base')) {
+        cssContent = '@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n' + cssContent;
+      }
+      
+      // Add font import if not present
+      if (!cssContent.includes('@import url')) {
+        cssContent = cssContent.replace(
+          '@tailwind utilities;',
+          `@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800;900&display=swap');`
+        );
+      }
+      
+      // Add base layer if not present
+      if (!cssContent.includes('@layer base')) {
+        cssContent += `
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+}`;
+      }
+      
+      await fs.writeFile(cssPath, cssContent);
+    }
+    
+    // Validate v3 structure
+    this.validateV3CSSStructure(cssContent);
+    console.log('[MCP Server] ✅ CSS v3 structure validated');
+  }
+
+  private validateV3CSSStructure(cssContent: string): void {
+    const requiredElements = [
+      '@tailwind base',
+      '@tailwind components',
+      '@tailwind utilities'
+    ];
+    
+    const missing = requiredElements.filter(element => !cssContent.includes(element));
+    
+    if (missing.length > 0) {
+      throw new Error(`CSS missing required v3 structure: ${missing.join(', ')}`);
+    }
+    
+    // Check for forbidden v4 elements
+    const forbiddenElements = ['@import "tailwindcss"', '@theme'];
+    const found = forbiddenElements.filter(element => cssContent.includes(element));
+    
+    if (found.length > 0) {
+      throw new Error(`CSS contains forbidden v4 syntax: ${found.join(', ')}`);
+    }
+  }
+
+  private async validateViteConfigV3(projectPath: string): Promise<void> {
+    const viteConfigPath = path.join(projectPath, 'vite.config.ts');
+    let viteConfig = await fs.readFile(viteConfigPath, 'utf-8');
+    
+    // Remove v4 PostCSS configuration
+    if (viteConfig.includes('@tailwindcss/postcss')) {
+      console.log('[MCP Server] ⚠️ Removing v4 PostCSS config from vite.config.ts...');
+      
+      // Remove the import
+      viteConfig = viteConfig.replace(
+        /import tailwindcss from '@tailwindcss\/postcss'\s*\n?/g,
+        ''
+      );
+      
+      // Remove the PostCSS configuration
+      viteConfig = viteConfig.replace(
+        /,\s*css:\s*\{\s*postcss:\s*\{\s*plugins:\s*\[tailwindcss\(\)\]\s*\}\s*\}/g,
+        ''
+      );
+      
+      await fs.writeFile(viteConfigPath, viteConfig);
+    }
+    
+    console.log('[MCP Server] ✅ Vite config v3 validated');
+  }
+
+  private generateThemeForProject(projectDescription: string): object {
+    // Analyze project description to suggest appropriate colors
+    const themes = {
+      business: {
+        primary: {
+          DEFAULT: '#1e40af',
+          foreground: '#ffffff'
+        },
+        secondary: {
+          DEFAULT: '#64748b',
+          foreground: '#ffffff'
+        },
+        accent: {
+          DEFAULT: '#059669',
+          foreground: '#ffffff'
+        },
+        background: '#ffffff',
+        foreground: '#1e293b'
+      },
+      creative: {
+        primary: {
+          DEFAULT: '#7c3aed',
+          foreground: '#ffffff'
+        },
+        secondary: {
+          DEFAULT: '#ec4899',
+          foreground: '#ffffff'
+        },
+        accent: {
+          DEFAULT: '#f59e0b',
+          foreground: '#ffffff'
+        },
+        background: '#fefefe',
+        foreground: '#1e293b'
+      },
+      healthcare: {
+        primary: {
+          DEFAULT: '#059669',
+          foreground: '#ffffff'
+        },
+        secondary: {
+          DEFAULT: '#0d9488',
+          foreground: '#ffffff'
+        },
+        accent: {
+          DEFAULT: '#dc2626',
+          foreground: '#ffffff'
+        },
+        background: '#ffffff',
+        foreground: '#1e293b'
+      },
+      finance: {
+        primary: {
+          DEFAULT: '#1f2937',
+          foreground: '#ffffff'
+        },
+        secondary: {
+          DEFAULT: '#6b7280',
+          foreground: '#ffffff'
+        },
+        accent: {
+          DEFAULT: '#059669',
+          foreground: '#ffffff'
+        },
+        background: '#ffffff',
+        foreground: '#1e293b'
+      },
+      default: {
+        primary: {
+          DEFAULT: '#3b82f6',
+          foreground: '#ffffff'
+        },
+        secondary: {
+          DEFAULT: '#64748b',
+          foreground: '#ffffff'
+        },
+        accent: {
+          DEFAULT: '#f59e0b',
+          foreground: '#ffffff'
+        },
+        background: '#ffffff',
+        foreground: '#1e293b'
+      }
+    };
+    
+    // Simple keyword matching to suggest theme
+    const description = projectDescription.toLowerCase();
+    let selectedTheme = themes.default;
+    
+    if (description.includes('business') || description.includes('corporate')) {
+      selectedTheme = themes.business;
+    } else if (description.includes('creative') || description.includes('design') || description.includes('art')) {
+      selectedTheme = themes.creative;
+    } else if (description.includes('health') || description.includes('medical')) {
+      selectedTheme = themes.healthcare;
+    } else if (description.includes('finance') || description.includes('banking') || description.includes('money')) {
+      selectedTheme = themes.finance;
+    }
+    
+    return selectedTheme;
+  }
+
+  // WebSocket server implementation
+  async runWebSocket() {
+    const port = parseInt(process.env.MCP_SERVER_PORT || '3001');
+    const host = process.env.MCP_SERVER_HOST || 'localhost';
+    
+    this.wss = new WebSocketServer({ 
+      port,
+      host,
+      perMessageDeflate: false
+    });
+    
+    console.error(`Starting ScopesFlow Cursor MCP Server on ws://${host}:${port}`);
+    
+    this.wss.on('connection', (ws) => {
+      console.error('MCP client connected');
+      
+      ws.on('message', async (data) => {
+        try {
+          const message = JSON.parse(data.toString());
+          console.error('Received message:', message.type || message.method);
+          console.error('Message details:', JSON.stringify(message, null, 2));
+          
+          const response = await this.processMessage(message);
+          ws.send(JSON.stringify(response));
+        } catch (error) {
+          console.error('Error processing message:', error);
+          ws.send(JSON.stringify({
+            error: error instanceof Error ? error.message : 'Unknown error',
+            type: 'error'
+          }));
+        }
+      });
+      
+      ws.on('close', () => {
+        console.error('MCP client disconnected');
+      });
+      
+      ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
+      });
+    });
+    
+    this.wss.on('error', (error) => {
+      console.error('WebSocket server error:', error);
+    });
+    
+    console.error(`ScopesFlow Cursor MCP Server running on ws://${host}:${port}`);
+  }
+
+  private async processMessage(message: any) {
+    try {
+      console.log('[MCP Server] Processing message:', message);
+      
+      if (message.type === 'request' && message.method) {
+        const toolName = message.method;
+        const args = message.params || {};
+        
+        console.log('[MCP Server] Tool call:', toolName, 'with args:', args);
+        
+        // Validate arguments based on tool type
+        let validatedArgs;
+        switch (toolName) {
+          case 'cursor/create-project':
+            validatedArgs = this.validateCreateProjectArgs(args);
+            break;
+          case 'cursor/execute-prompt':
+            validatedArgs = this.validateExecutePromptArgs(args);
+            break;
+          case 'cursor/get-project-state':
+          case 'cursor/build-project':
+          case 'cursor/run-tests':
+          case 'cursor/check-project':
+            validatedArgs = this.validateProjectPathArgs(args);
+            break;
+          case 'cursor/get-files':
+            validatedArgs = this.validateGetFilesArgs(args);
+            break;
+          case 'cursor/server-info':
+            validatedArgs = {};
+            break;
+          default:
+            throw new Error(`Unknown tool: ${toolName}`);
+        }
+        
+        const handler = this.toolHandlers.get(toolName);
+        if (!handler) {
+          throw new Error(`Unknown tool: ${toolName}`);
+        }
+        
+        const result = await handler(validatedArgs);
+        
+        console.log('[MCP Server] Tool result:', result);
+        
+        return {
+          id: message.id,
+          type: 'response',
+          result: result
+        };
+      }
+      
+      if (message.type === 'request' && !message.method) {
+        const tools = {
+          tools: [
+            {
+              name: 'cursor/create-project',
+              description: 'Create a new Cursor project'
+            },
+            {
+              name: 'cursor/execute-prompt',
+              description: 'Execute a prompt in Cursor'
+            },
+            {
+              name: 'cursor/get-project-state',
+              description: 'Get current project state'
+            },
+            {
+              name: 'cursor/build-project',
+              description: 'Build the project'
+            },
+            {
+              name: 'cursor/run-tests',
+              description: 'Run tests in the project'
+            },
+            {
+              name: 'cursor/check-project',
+              description: 'Check if project exists'
+            },
+            {
+              name: 'cursor/get-files',
+              description: 'Get list of files in project'
+            },
+            {
+              name: 'cursor/server-info',
+              description: 'Get server information'
+            }
+          ]
+        };
+        
+        return {
+          id: message.id,
+          type: 'response',
+          result: tools
+        };
+      }
+      
+      return { 
+        error: 'Unknown message type',
+        type: 'error'
+      };
+    } catch (error) {
+      console.error('[MCP Server] Error in processMessage:', error);
+      return {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        type: 'error'
+      };
+    }
+  }
+
+  // NEW: stdio server for Cursor integration
+  async run() {
+    console.error('Starting ScopesFlow Cursor MCP Server on stdio');
+    
+    // For now, just log that stdio mode is not yet implemented
+    // TODO: Implement proper stdio integration with MCP SDK
+    console.error('stdio mode not yet implemented - using WebSocket mode instead');
+    
+    // Fallback to WebSocket mode for now
+    await this.runWebSocket();
+  }
+
+  async stop() {
+    if (this.wss) {
+      this.wss.close();
+      console.error('WebSocket server stopped');
+    }
+  }
+}
+
+// Start the server
+const server = new CursorMCPServer();
+
+// Handle graceful shutdown
+process.on('SIGINT', async () => {
+  console.error('Shutting down MCP server...');
+  await server.stop();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.error('Shutting down MCP server...');
+  await server.stop();
+  process.exit(0);
+});
+
+// Determine server mode based on command line arguments
+const args = process.argv.slice(2);
+const mode = args.includes('--cursor') ? 'cursor' : 'websocket';
+
+if (mode === 'cursor') {
+  // Start stdio server for Cursor integration
+  console.error('Starting MCP server in Cursor mode (stdio)...');
+  server.run().catch(console.error);
+} else {
+  // Start WebSocket server for ScopesFlow integration
+  console.error('Starting MCP server in WebSocket mode...');
+  server.runWebSocket().catch(console.error);
+}
+
+
+
+
+
+
+
+
