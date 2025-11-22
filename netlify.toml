@@ -3,6 +3,8 @@
   command = "npm run build"
   # Publish directory (not needed for serverless functions, but required by Netlify)
   publish = "dist"
+  # Skip submodule checkout to avoid errors with cursor-projects
+  ignore = "git submodule"
 
 [functions]
   # Directory where Netlify Functions are located

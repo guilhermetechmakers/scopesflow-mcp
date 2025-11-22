@@ -38,3 +38,6 @@ yarn-error.log*
 
 # Optional eslint cache
 .eslintcache
+
+# Cursor projects (generated, should not be tracked)
+cursor-projects/
