@@ -1404,8 +1404,9 @@ See DESIGN_RULES.md in the server root for complete guidelines.
         // Don't fail the entire operation, but log the issue
       }
 
-      // Validate and fix Tailwind v3 setup (skip for Expo projects - they use NativeWind)
-      if (config.framework !== 'react-expo') {
+      // Validate and fix Tailwind v3 setup (skip for Expo; skip when headless e.g. VPS build runner)
+      const isHeadless = process.env.MCP_HEADLESS === 'true' || process.env.MCP_BUILD_RUNNER === 'true';
+      if (config.framework !== 'react-expo' && !isHeadless) {
       try {
         await this.validateAndFixTailwindV3(config.projectPath);
         console.log(`[MCP Server] ✅ Tailwind v3 validation completed for ${config.projectName}`);
@@ -1413,7 +1414,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
         console.warn(`[MCP Server] ⚠️ Tailwind v3 validation failed for ${config.projectName}:`, validationError);
         // Don't fail the entire operation, but log the issue
         }
-      } else {
+      } else if (config.framework === 'react-expo') {
         // Setup NativeWind for Expo projects
         try {
           await this.setupNativeWindForExpo(config.projectPath);

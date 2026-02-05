@@ -95,9 +95,11 @@ export async function runBuildLoop(
     if (error) log(`Failed to update status: ${error.message}`, 'error');
   };
 
-  // Map level to log_type: build_logs often has CHECK (log_type IN ('stdout','stderr'))
+  // log_type must match DB CHECK constraint; override via env if needed (e.g. 'info'/'error')
+  const LOG_TYPE_INFO = process.env.MCP_BUILD_LOG_TYPE_INFO ?? 'stdout';
+  const LOG_TYPE_ERROR = process.env.MCP_BUILD_LOG_TYPE_ERROR ?? 'stderr';
   const levelToLogType = (level: string): string =>
-    level === 'error' ? 'stderr' : 'stdout';
+    level === 'error' ? LOG_TYPE_ERROR : LOG_TYPE_INFO;
 
   const appendLog = async (message: string, level: string = 'info') => {
     const { error } = await supabase.from('build_logs').insert({
