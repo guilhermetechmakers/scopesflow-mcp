@@ -6,7 +6,9 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as http from 'http';
 import * as dotenv from 'dotenv';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { WebSocketServer } from 'ws';
+import { runBuildLoop } from './build-runner.js';
 
 // Load environment variables (optional now, not required for Cursor CLI)
 dotenv.config();
@@ -5014,18 +5016,104 @@ module.exports = {
   }
 
   /**
-   * Build runner stub: called by POST /api/start-build after API key check.
-   * Payload: { buildId, supabaseUrl, accessToken, anonKey } from Edge Function.
-   * Implement the actual build loop (Supabase updates, runner process) as needed.
+   * Real runBuild: validate user, load build row and config, optionally load GitHub auth,
+   * then start the build loop in the background and return so the HTTP handler can send 200.
    */
-  private async runBuild(_payload: {
-    buildId: string;
-    supabaseUrl?: string;
-    accessToken?: string;
-    anonKey?: string;
-  }): Promise<void> {
-    console.error('[MCP Server] Build started (runner stub)', { buildId: _payload.buildId });
-    // TODO: implement build loop (update automated_builds, run steps, write build_logs)
+  private async runBuild(
+    buildId: string,
+    supabaseUrl: string,
+    accessToken: string,
+    anonKey: string
+  ): Promise<void> {
+    const supabase: SupabaseClient = createClient(supabaseUrl, anonKey, {
+      global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    });
+
+    const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
+    if (userError || !user) {
+      console.error('[MCP Server] Build start: invalid user', userError?.message ?? 'no user');
+      return;
+    }
+
+    const { data: buildRow, error: buildError } = await supabase
+      .from('automated_builds')
+      .select('*')
+      .eq('id', buildId)
+      .single();
+
+    if (buildError || !buildRow) {
+      console.error('[MCP Server] Build start: build not found', buildId, buildError?.message);
+      return;
+    }
+
+    const configuration = (buildRow as { configuration?: unknown }).configuration;
+    const cursorConfig = configuration && typeof configuration === 'object' && 'cursorConfig' in configuration
+      ? (configuration as { cursorConfig?: unknown }).cursorConfig
+      : undefined;
+
+    if (!configuration || !cursorConfig) {
+      console.error('[MCP Server] Build start: configuration or cursorConfig missing', buildId);
+      return;
+    }
+
+    let githubAuth: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string } | undefined;
+    try {
+      const { data: ghRow } = await supabase
+        .from('github_auth')
+        .select('access_token, login, email')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      if (ghRow && typeof ghRow === 'object') {
+        const row = ghRow as { access_token?: string; login?: string; email?: string };
+        githubAuth = {
+          gitHubToken: row.access_token,
+          gitUserName: row.login,
+          gitUserEmail: row.email,
+        };
+      }
+    } catch {
+      // optional
+    }
+
+    const createProjectFn = (config: unknown) => {
+      const c = config as Record<string, unknown>;
+      const args = {
+        name: c.projectName ?? c.name,
+        path: c.projectPath ?? c.path,
+        framework: c.framework,
+        packageManager: c.packageManager,
+        template: c.template,
+        gitRepository: c.gitRepository,
+        gitHubToken: c.gitHubToken,
+        gitUserName: c.gitUserName,
+        gitUserEmail: c.gitUserEmail,
+        supabaseUrl: c.supabaseUrl,
+        supabaseServiceRoleKey: c.supabaseServiceRoleKey,
+        designPattern: c.designPattern,
+        designPatternSummary: c.designPatternSummary,
+        designPatternDetails: c.designPatternDetails,
+        designColorPalette: c.designColorPalette,
+        designTypographyLayout: c.designTypographyLayout,
+        designKeyElements: c.designKeyElements,
+        designPhilosophy: c.designPhilosophy,
+        designReference: c.designReference,
+        designPatternId: c.designPatternId,
+        designPatternStore: c.designPatternStore,
+      };
+      return this.createProject(this.validateCreateProjectArgs(args));
+    };
+    const executePromptFn = (args: unknown) =>
+      this.executePrompt(this.validateExecutePromptArgs(args as Record<string, unknown>));
+
+    setImmediate(() => {
+      runBuildLoop(supabase, buildId, {
+        createProjectFn,
+        executePromptFn,
+        githubAuth,
+      }).catch((err) => {
+        console.error('[MCP Server] runBuildLoop error:', err);
+      });
+    });
   }
 
   /** CORS headers for /api/start-build (browser or Edge Function). */
@@ -5097,21 +5185,34 @@ module.exports = {
         req.on('data', (chunk) => { body += chunk; });
         req.on('end', () => {
           try {
-            const payload = JSON.parse(body || '{}') as { buildId: string; supabaseUrl?: string; accessToken?: string; anonKey?: string };
-            if (!payload.buildId) {
+            const payload = JSON.parse(body || '{}') as {
+              buildId?: string;
+              supabaseUrl?: string;
+              accessToken?: string;
+              anonKey?: string;
+            };
+            const { buildId, supabaseUrl, accessToken, anonKey } = payload;
+            if (!buildId || !supabaseUrl || !accessToken || !anonKey) {
+              const missing = [
+                !buildId && 'buildId',
+                !supabaseUrl && 'supabaseUrl',
+                !accessToken && 'accessToken',
+                !anonKey && 'anonKey',
+              ].filter(Boolean);
               res.writeHead(400, cors);
-              res.end(JSON.stringify({ error: 'Missing buildId' }));
+              res.end(JSON.stringify({ error: `Missing required fields: ${missing.join(', ')}` }));
               return;
             }
-            this.runBuild(payload)
+            this.runBuild(buildId, supabaseUrl, accessToken, anonKey)
               .then(() => {
                 res.writeHead(200, cors);
-                res.end(JSON.stringify({ ok: true, buildId: payload.buildId }));
+                res.end(JSON.stringify({ started: true }));
               })
               .catch((err) => {
+                const message = err instanceof Error ? err.message : 'Build start failed';
                 console.error('[MCP Server] runBuild error:', err);
                 res.writeHead(500, cors);
-                res.end(JSON.stringify({ error: 'Build start failed' }));
+                res.end(JSON.stringify({ error: message }));
               });
           } catch (e) {
             res.writeHead(400, cors);
