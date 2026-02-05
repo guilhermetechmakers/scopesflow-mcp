@@ -1,3 +1,4 @@
+import * as path from 'path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 /** Config passed to create-project (matches server CursorProjectConfig shape). */
@@ -97,7 +98,7 @@ export async function runBuildLoop(
   const appendLog = async (message: string, level: string = 'info') => {
     const { error } = await supabase.from('build_logs').insert({
       build_id: buildId,
-      level,
+      log_type: level,
       message,
       created_at: new Date().toISOString(),
     });
@@ -144,12 +145,23 @@ export async function runBuildLoop(
     await updateStatus('running', 0);
     await appendLog('Build started');
 
-    const projectPath = cursorConfig.projectPath;
-    const projectName = cursorConfig.projectName;
+    const projectName =
+      (cursorConfig as { projectName?: string; name?: string }).projectName ??
+      (cursorConfig as { projectName?: string; name?: string }).name ??
+      'app';
+    const baseDir =
+      process.env.MCP_BUILD_PROJECTS_DIR || process.env.TMPDIR || process.cwd();
+    const rawPath =
+      (cursorConfig as { projectPath?: string; path?: string }).projectPath ??
+      (cursorConfig as { projectPath?: string; path?: string }).path;
+    const projectPath =
+      typeof rawPath === 'string' && rawPath.trim()
+        ? rawPath.trim()
+        : path.join(baseDir, 'builds', buildId, projectName);
 
     const createConfig: BuildCursorConfig = {
       ...cursorConfig,
-      projectName: projectName || cursorConfig.projectPath?.split(/[/\\]/).pop() || 'app',
+      projectName,
       projectPath,
     };
     if (githubAuth) {
