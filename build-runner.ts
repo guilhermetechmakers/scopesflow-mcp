@@ -136,6 +136,26 @@ export async function runBuildLoop(
     return;
   }
 
+  // Debug: log what we received from DB
+  console.error('[BuildRunner] Full configuration from DB:', JSON.stringify(configuration, null, 2));
+  console.error('[BuildRunner] cursorConfig from DB:', JSON.stringify(cursorConfig, null, 2));
+
+  // Merge any top-level configuration fields into cursorConfig (in case ScopesFlow stores them there)
+  const cursorConfigObj = cursorConfig as unknown as Record<string, unknown>;
+  const configObj = configuration as unknown as Record<string, unknown>;
+  const mergedCursorConfig: Record<string, unknown> = {
+    ...(cursorConfigObj || {}),
+  };
+  // Merge top-level fields if they exist and aren't already in cursorConfig
+  if (configObj.projectName && !mergedCursorConfig.projectName) mergedCursorConfig.projectName = configObj.projectName;
+  if (configObj.name && !mergedCursorConfig.projectName && !mergedCursorConfig.name) mergedCursorConfig.projectName = configObj.name;
+  if (configObj.projectPath && !mergedCursorConfig.projectPath) mergedCursorConfig.projectPath = configObj.projectPath;
+  if (configObj.path && !mergedCursorConfig.projectPath && !mergedCursorConfig.path) mergedCursorConfig.projectPath = configObj.path;
+  if (configObj.gitRepository && !mergedCursorConfig.gitRepository) mergedCursorConfig.gitRepository = configObj.gitRepository;
+  if (configObj.supabaseUrl && !mergedCursorConfig.supabaseUrl) mergedCursorConfig.supabaseUrl = configObj.supabaseUrl;
+  if (configObj.designReference && !mergedCursorConfig.designReference) mergedCursorConfig.designReference = configObj.designReference;
+  if (configObj.designPatternId && !mergedCursorConfig.designPatternId) mergedCursorConfig.designPatternId = configObj.designPatternId;
+
   let prompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
   if (prompts.length === 0) {
     const { data: promptRows } = await supabase
@@ -153,21 +173,21 @@ export async function runBuildLoop(
     await appendLog('Build started');
 
     const projectName =
-      (cursorConfig as { projectName?: string; name?: string }).projectName ??
-      (cursorConfig as { projectName?: string; name?: string }).name ??
+      (mergedCursorConfig as { projectName?: string; name?: string }).projectName ??
+      (mergedCursorConfig as { projectName?: string; name?: string }).name ??
       'app';
     const baseDir =
       process.env.MCP_BUILD_PROJECTS_DIR || process.env.TMPDIR || process.cwd();
     const rawPath =
-      (cursorConfig as { projectPath?: string; path?: string }).projectPath ??
-      (cursorConfig as { projectPath?: string; path?: string }).path;
+      (mergedCursorConfig as { projectPath?: string; path?: string }).projectPath ??
+      (mergedCursorConfig as { projectPath?: string; path?: string }).path;
     const projectPath =
       typeof rawPath === 'string' && rawPath.trim()
         ? rawPath.trim()
         : path.join(baseDir, 'builds', buildId, projectName);
 
     const createConfig: BuildCursorConfig = {
-      ...cursorConfig,
+      ...(mergedCursorConfig as unknown as BuildCursorConfig),
       projectName,
       projectPath,
     };

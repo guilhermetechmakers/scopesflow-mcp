@@ -5070,28 +5070,12 @@ module.exports = {
 
     const createProjectFn = (config: unknown) => {
       const c = config as Record<string, unknown>;
+      // Pass through all fields from config, ensure name/path exist for validateCreateProjectArgs
+      // (validateCreateProjectArgs expects 'name' and 'path', but config may have 'projectName'/'projectPath')
       const args = {
-        name: c.projectName ?? c.name,
-        path: c.projectPath ?? c.path,
-        framework: c.framework,
-        packageManager: c.packageManager,
-        template: c.template,
-        gitRepository: c.gitRepository,
-        gitHubToken: c.gitHubToken,
-        gitUserName: c.gitUserName,
-        gitUserEmail: c.gitUserEmail,
-        supabaseUrl: c.supabaseUrl,
-        supabaseServiceRoleKey: c.supabaseServiceRoleKey,
-        designPattern: c.designPattern,
-        designPatternSummary: c.designPatternSummary,
-        designPatternDetails: c.designPatternDetails,
-        designColorPalette: c.designColorPalette,
-        designTypographyLayout: c.designTypographyLayout,
-        designKeyElements: c.designKeyElements,
-        designPhilosophy: c.designPhilosophy,
-        designReference: c.designReference,
-        designPatternId: c.designPatternId,
-        designPatternStore: c.designPatternStore,
+        ...c, // Spread all original fields first (preserves everything)
+        name: c.projectName ?? c.name, // Map projectName -> name for validation
+        path: c.projectPath ?? c.path,   // Map projectPath -> path for validation
       };
       return this.createProject(this.validateCreateProjectArgs(args));
     };
