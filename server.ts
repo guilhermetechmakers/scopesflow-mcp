@@ -1424,14 +1424,6 @@ See DESIGN_RULES.md in the server root for complete guidelines.
         }
       }
 
-      // Open project in Cursor (optional)
-      try {
-        await execAsync(`cursor "${config.projectPath}"`, { timeout: 10000 });
-      } catch (cursorError) {
-        console.warn('Failed to open in Cursor:', cursorError);
-        // Don't fail the entire operation if Cursor isn't available
-      }
-
       console.log(`[MCP Server] Project created successfully at ${config.projectPath}`);
 
       // Cleanup temporary design pattern storage
