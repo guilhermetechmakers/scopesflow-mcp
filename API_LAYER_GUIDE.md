@@ -1,7 +1,7 @@
 # API Layer Architecture Guide
 
 ## Overview
-This guide covers the centralized API layer architecture for the modern React boilerplate. The API layer provides a clean separation between data fetching logic and UI components, making the codebase more maintainable and testable. This guide uses generic REST API patterns that work with any backend.
+This guide covers the centralized API layer architecture for the modern React boilerplate. The API layer provides a clean separation between data fetching logic and UI components, making the codebase more maintainable and testable. **Canonical approach:** native `fetch()` via `src/lib/api.ts`. When Supabase is used, the client handles DB/Auth/Realtime/Storage, and Edge Functions act as the API for server-only logic (e.g. LLM, secrets).
 
 ## Architecture Principles
 
@@ -27,6 +27,8 @@ This guide covers the centralized API layer architecture for the modern React bo
 
 ```
 src/
+├── lib/
+│   └── api.ts            # Fetch-based API client (canonical)
 ├── api/                    # Centralized API functions
 │   ├── projects.ts        # Project-related API calls
 │   ├── users.ts          # User-related API calls
@@ -42,49 +44,50 @@ src/
     └── user.ts           # User types
 ```
 
+When using Supabase, add `src/lib/supabase.ts` (or `src/integrations/supabase/client.ts`) and call Edge Functions via `supabase.functions.invoke()`.
+
 ## API Layer Implementation
 
-### 1. API Client Configuration (`src/api/client.ts`)
+### 1. API Client Configuration (`src/lib/api.ts`) – preferred
+
+Use native `fetch()` with a thin wrapper. No axios dependency.
+
 ```ts
-import axios, { AxiosInstance, AxiosError } from 'axios';
-
-// Create axios instance with default config
-const apiClient: AxiosInstance = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3000/api',
-  timeout: 10000,
-  headers: {
+async function apiRequest<T>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const base = import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
+  const url = `${base}${endpoint}`;
+  const headers: HeadersInit = {
     'Content-Type': 'application/json',
-  },
-});
+    ...(options.headers as Record<string, string>),
+  };
+  const token = localStorage.getItem('auth_token');
+  if (token) (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
 
-// Request interceptor for auth tokens
-apiClient.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('auth_token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
-
-// Response interceptor for error handling
-apiClient.interceptors.response.use(
-  (response) => response,
-  (error: AxiosError) => {
-    if (error.response?.status === 401) {
-      // Handle unauthorized access
+  const res = await fetch(url, { ...options, headers });
+  if (!res.ok) {
+    if (res.status === 401) {
       localStorage.removeItem('auth_token');
       window.location.href = '/login';
     }
-    return Promise.reject(error);
+    throw new Error(`API Error: ${res.status}`);
   }
-);
+  return res.json();
+}
 
-export default apiClient;
+export const api = {
+  get: <T>(endpoint: string) => apiRequest<T>(endpoint),
+  post: <T>(endpoint: string, data: unknown) =>
+    apiRequest<T>(endpoint, { method: 'POST', body: JSON.stringify(data) }),
+  put: <T>(endpoint: string, data: unknown) =>
+    apiRequest<T>(endpoint, { method: 'PUT', body: JSON.stringify(data) }),
+  patch: <T>(endpoint: string, data: unknown) =>
+    apiRequest<T>(endpoint, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: <T>(endpoint: string) => apiRequest<T>(endpoint, { method: 'DELETE' }),
+};
 
-// Type definitions
 export interface ApiResponse<T> {
   data: T | null;
   error: string | null;
@@ -111,159 +114,96 @@ export class ApiError extends Error {
 
 ### 2. Projects API (`src/api/projects.ts`)
 ```ts
-import apiClient from './client';
+import { api } from '@/lib/api';
 import type { Project, CreateProjectInput, UpdateProjectInput } from '@/types/project';
 
 export const projectsApi = {
-  // Get all projects
-  getAll: async (): Promise<Project[]> => {
-    const response = await apiClient.get<Project[]>('/projects');
-    return response.data;
-  },
+  getAll: async (): Promise<Project[]> =>
+    api.get<Project[]>('/projects'),
 
-  // Get project by ID
-  getById: async (id: string): Promise<Project> => {
-    const response = await apiClient.get<Project>(`/projects/${id}`);
-    return response.data;
-  },
+  getById: async (id: string): Promise<Project> =>
+    api.get<Project>(`/projects/${id}`),
 
-  // Create new project
-  create: async (project: CreateProjectInput): Promise<Project> => {
-    const response = await apiClient.post<Project>('/projects', project);
-    return response.data;
-  },
+  create: async (project: CreateProjectInput): Promise<Project> =>
+    api.post<Project>('/projects', project),
 
-  // Update project
-  update: async (id: string, updates: UpdateProjectInput): Promise<Project> => {
-    const response = await apiClient.put<Project>(`/projects/${id}`, updates);
-    return response.data;
-  },
+  update: async (id: string, updates: UpdateProjectInput): Promise<Project> =>
+    api.put<Project>(`/projects/${id}`, updates),
 
-  // Partial update project
-  patch: async (id: string, updates: Partial<UpdateProjectInput>): Promise<Project> => {
-    const response = await apiClient.patch<Project>(`/projects/${id}`, updates);
-    return response.data;
-  },
+  patch: async (id: string, updates: Partial<UpdateProjectInput>): Promise<Project> =>
+    api.patch<Project>(`/projects/${id}`, updates),
 
-  // Delete project
-  delete: async (id: string): Promise<void> => {
-    await apiClient.delete(`/projects/${id}`);
-  },
+  delete: async (id: string): Promise<void> =>
+    api.delete(`/projects/${id}`),
 
-  // Get projects by user
-  getByUserId: async (userId: string): Promise<Project[]> => {
-    const response = await apiClient.get<Project[]>(`/projects/user/${userId}`);
-    return response.data;
-  },
+  getByUserId: async (userId: string): Promise<Project[]> =>
+    api.get<Project[]>(`/projects/user/${userId}`),
 
-  // Search projects
-  search: async (query: string): Promise<Project[]> => {
-    const response = await apiClient.get<Project[]>('/projects/search', {
-      params: { q: query },
-    });
-    return response.data;
-  },
+  search: async (query: string): Promise<Project[]> =>
+    api.get<Project[]>(`/projects/search?q=${encodeURIComponent(query)}`),
 };
 ```
 
 ### 3. Users API (`src/api/users.ts`)
 ```ts
-import apiClient from './client';
+import { api } from '@/lib/api';
 import type { User, UpdateUserInput } from '@/types/user';
 
 export const usersApi = {
-  // Get current user
-  getCurrent: async (): Promise<User> => {
-    const response = await apiClient.get<User>('/users/me');
-    return response.data;
-  },
+  getCurrent: async (): Promise<User> =>
+    api.get<User>('/users/me'),
 
-  // Update user profile
-  updateProfile: async (updates: UpdateUserInput): Promise<User> => {
-    const response = await apiClient.put<User>(`/users/${updates.id}`, updates);
-    return response.data;
-  },
+  updateProfile: async (updates: UpdateUserInput): Promise<User> =>
+    api.put<User>(`/users/${updates.id}`, updates),
 
-  // Get user by ID
-  getById: async (id: string): Promise<User> => {
-    const response = await apiClient.get<User>(`/users/${id}`);
-    return response.data;
-  },
+  getById: async (id: string): Promise<User> =>
+    api.get<User>(`/users/${id}`),
 
-  // Get all users (admin only)
-  getAll: async (): Promise<User[]> => {
-    const response = await apiClient.get<User[]>('/users');
-    return response.data;
-  },
+  getAll: async (): Promise<User[]> =>
+    api.get<User[]>('/users'),
 
-  // Delete user account
-  delete: async (id: string): Promise<void> => {
-    await apiClient.delete(`/users/${id}`);
-  },
+  delete: async (id: string): Promise<void> =>
+    api.delete(`/users/${id}`),
 };
 ```
 
 ### 4. Authentication API (`src/api/auth.ts`)
 ```ts
-import apiClient from './client';
+import { api } from '@/lib/api';
 import type { AuthResponse, SignInInput, SignUpInput } from '@/types/auth';
 
 export const authApi = {
-  // Sign in with email and password
   signIn: async (credentials: SignInInput): Promise<AuthResponse> => {
-    const response = await apiClient.post<AuthResponse>('/auth/login', credentials);
-    
-    // Store auth token
-    if (response.data.token) {
-      localStorage.setItem('auth_token', response.data.token);
-    }
-    
-    return response.data;
+    const data = await api.post<AuthResponse>('/auth/login', credentials);
+    if (data.token) localStorage.setItem('auth_token', data.token);
+    return data;
   },
 
-  // Sign up with email and password
   signUp: async (credentials: SignUpInput): Promise<AuthResponse> => {
-    const response = await apiClient.post<AuthResponse>('/auth/register', credentials);
-    
-    // Optionally store token on signup
-    if (response.data.token) {
-      localStorage.setItem('auth_token', response.data.token);
-    }
-    
-    return response.data;
+    const data = await api.post<AuthResponse>('/auth/register', credentials);
+    if (data.token) localStorage.setItem('auth_token', data.token);
+    return data;
   },
 
-  // Sign out
   signOut: async (): Promise<void> => {
-    await apiClient.post('/auth/logout');
+    await api.post('/auth/logout', {});
     localStorage.removeItem('auth_token');
   },
 
-  // Reset password - send reset email
-  resetPassword: async (email: string): Promise<void> => {
-    await apiClient.post('/auth/forgot-password', { email });
-  },
+  resetPassword: async (email: string): Promise<void> =>
+    api.post('/auth/forgot-password', { email }),
 
-  // Update password with reset token
-  updatePassword: async (token: string, newPassword: string): Promise<void> => {
-    await apiClient.post('/auth/reset-password', { token, password: newPassword });
-  },
+  updatePassword: async (token: string, newPassword: string): Promise<void> =>
+    api.post('/auth/reset-password', { token, password: newPassword }),
 
-  // Refresh auth token
   refreshToken: async (): Promise<AuthResponse> => {
-    const response = await apiClient.post<AuthResponse>('/auth/refresh');
-    
-    if (response.data.token) {
-      localStorage.setItem('auth_token', response.data.token);
-    }
-    
-    return response.data;
+    const data = await api.post<AuthResponse>('/auth/refresh', {});
+    if (data.token) localStorage.setItem('auth_token', data.token);
+    return data;
   },
 
-  // Verify email with token
-  verifyEmail: async (token: string): Promise<void> => {
-    await apiClient.post('/auth/verify-email', { token });
-  },
+  verifyEmail: async (token: string): Promise<void> =>
+    api.post('/auth/verify-email', { token }),
 };
 ```
 
@@ -607,6 +547,40 @@ export function CreateProjectForm() {
 }
 ```
 
+## API Layer with Supabase
+
+When Supabase is configured, use two surfaces:
+
+- **Supabase client** (`src/lib/supabase.ts`): Auth, database (with RLS), Realtime, Storage. Use the client directly in API modules or hooks for CRUD and subscriptions.
+- **Edge Functions**: Server-only logic, LLM calls, third-party APIs with secrets. Invoke from the app with `supabase.functions.invoke()`.
+
+File layout: keep `src/api/` for resource modules; add `src/lib/supabase.ts` and, for Edge, call `supabase.functions.invoke('function-name', { body })` from a dedicated API function or hook.
+
+## Edge Functions as API
+
+Treat Edge Functions as API endpoints: define typed request/response and call them from hooks.
+
+```ts
+// src/api/edge.ts
+import { supabase } from '@/lib/supabase';
+
+export const edgeApi = {
+  invoke: async <TReq, TRes>(name: string, body: TReq): Promise<TRes> => {
+    const { data, error } = await supabase.functions.invoke(name, { body });
+    if (error) throw new Error(error.message);
+    return data as TRes;
+  },
+};
+```
+
+Use in a hook with the same React Query and toast patterns (e.g. `useMutation`, `onError: (e) => toast.error(e.message)`). For streaming (e.g. LLM), consume the response stream in the hook and update state as chunks arrive.
+
+## LLM and External APIs
+
+- **Rule:** Never call LLM or third-party APIs with API keys from the client. Use an Edge Function (or app backend) as a proxy.
+- **Pattern:** Create an Edge Function (e.g. `llm-proxy`) that accepts `{ messages, model?, stream? }`, calls OpenAI/Anthropic with a server-side API key, and returns JSON or a stream. Call it via `supabase.functions.invoke('llm-proxy', { body })` from a hook (e.g. `useLLM` or `useChat`).
+- Use the same error handling and toasts as the rest of the API layer; map provider/rate-limit errors to user-facing messages.
+
 ## Best Practices
 
 ### 1. Error Handling
@@ -626,7 +600,7 @@ export function CreateProjectForm() {
 - Use generic types for reusable API functions
 - Validate API responses with runtime checks if needed
 - Keep types in sync with backend schema
-- Use axios response types for type safety
+- Use generic types and API response types for type safety
 
 ### 4. Testing
 - Mock API functions in tests

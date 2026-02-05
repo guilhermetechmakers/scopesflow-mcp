@@ -603,6 +603,77 @@ export function useCreateProject() {
 }
 ```
 
+**When Supabase is used:** Also use the Supabase client for DB/Auth/Realtime/Storage; use Edge Functions or your backend for LLM calls and any logic that requires secrets (never expose API keys in the client).
+
+## Supabase and Edge Functions
+
+When Supabase is configured (e.g. `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in `.env.local`):
+
+### When to use what
+
+- **Supabase client** (browser): Auth, database CRUD (with RLS), Realtime subscriptions, Storage uploads/downloads.
+- **Edge Functions**: LLM calls, third-party APIs that need secrets, webhooks, cron jobs, or any server-only logic. Never put API keys in the client.
+
+### Client setup
+
+```ts
+// src/lib/supabase.ts (or src/integrations/supabase/client.ts)
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL!;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY!;
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+});
+```
+
+### Calling Edge Functions from the app
+
+```ts
+// Invoke an Edge Function (e.g. LLM proxy, webhook handler)
+const { data, error } = await supabase.functions.invoke('my-function', {
+  body: { key: 'value' },
+});
+if (error) throw error;
+```
+
+Create Edge Functions with `supabase functions new <name>`. Implement in `supabase/functions/<name>/index.ts` (Deno). Use `Deno.env.get('SUPABASE_URL')` and secrets for API keys; never expose keys to the client.
+
+## LLM and AI (via Edge / backend)
+
+- **Rule:** All LLM calls (OpenAI, Anthropic, etc.) go through a backend or Supabase Edge Function. Never expose LLM or third-party API keys in the client.
+- **Recommended:** Use official SDKs (e.g. `openai`, `@anthropic-ai/sdk`) inside Edge Functions; store keys in Supabase secrets or env.
+- **Pattern:** Client calls `supabase.functions.invoke('llm-proxy', { body: { messages, model?, stream? } })`; Edge validates input, calls the provider, returns JSON or streams.
+
+### Minimal Edge LLM proxy (non-streaming)
+
+```ts
+// supabase/functions/llm-proxy/index.ts (Deno)
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+
+serve(async (req) => {
+  const { messages, model = 'gpt-4o-mini' } = await req.json();
+  const apiKey = Deno.env.get('OPENAI_API_KEY');
+  if (!apiKey) return new Response('Missing OPENAI_API_KEY', { status: 500 });
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages }),
+  });
+  const data = await res.json();
+  return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
+});
+```
+
+For streaming, return a `ReadableStream` from the Edge Function and consume it in the client (e.g. with a hook that updates React state as chunks arrive).
+
+### Performance
+
+- Use Edge Functions for heavy or server-only work so the client stays fast.
+- Use streaming for LLM responses when you need incremental UI updates.
+- Keep React Query defaults (e.g. staleTime, gcTime) as in the boilerplate for predictable caching.
+
 ## Environment Configuration
 **.env**
 ```ini

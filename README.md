@@ -9,7 +9,8 @@ ScopesFlow MCP Server provides a bridge between Cursor CLI and automated develop
 ## Features
 
 - **Cursor CLI Integration**: Execute prompts and manage Cursor projects programmatically
-- **Project Generation**: Create and manage Next.js/React projects with modern tooling
+- **Project Generation**: Create and manage Next.js/React/Vue/Expo projects with modern tooling
+- **Mobile Development**: Expo support for React Native mobile app development
 - **GitHub Integration**: Automated repository creation and management
 - **Supabase Integration**: Database and backend service integration
 - **VPS Deployment**: SSH-based deployment capabilities
@@ -81,4 +82,5 @@ MIT
 ## Author
 
 ScopesFlow
+
 

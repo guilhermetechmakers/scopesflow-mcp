@@ -18,11 +18,12 @@ When creating a new project, **ALWAYS attach these reference files** to your fir
    - Includes specifications for layouts, animations, interactions, and accessibility
    - **Why needed**: Ensures consistent, professional design across all projects
 
-2. **@REACT_BOILERPLATE.md**
-   - Complete boilerplate documentation for Vite + React + TypeScript
-   - Dependency versions and setup instructions
+2. **Framework-Specific Boilerplate** (Choose based on project type):
+   - **@REACT_BOILERPLATE.md** - For web React projects (Vite + React + TypeScript)
+   - **@EXPO_BOILERPLATE.md** - For mobile Expo/React Native projects
+   - Complete boilerplate documentation with dependency versions and setup instructions
    - Project structure and architecture patterns
-   - Testing setup with Vitest
+   - Testing setup
    - API layer architecture
    - **Why needed**: Provides the technical foundation and architecture standards
 
@@ -231,9 +232,11 @@ Additional Notes:
 ## What Happens During Project Creation
 
 ### 1. Project Scaffolding
-- Vite + React + TypeScript project is created
+- Framework-specific project is created:
+  - **Web**: Vite + React + TypeScript (or Next.js/Vue)
+  - **Mobile**: Expo + React Native + TypeScript
 - All dependencies are installed automatically
-- Shadcn/ui components are initialized
+- UI components are initialized (Shadcn/ui for web, NativeWind for mobile)
 - Project structure is set up
 
 ### 2. Design Reference Creation
@@ -253,6 +256,43 @@ The Cursor Agent will:
 - Set up the complete project structure
 
 ---
+
+## Creating Mobile Apps with Expo
+
+For mobile app development, specify `react-expo` as the framework:
+
+```
+Create a mobile app with Expo and React Native with the following requirements:
+
+[Describe the mobile app features]
+
+Framework: react-expo
+
+Technical Requirements:
+- Native mobile features (camera, notifications, etc.)
+- Offline support
+- Push notifications
+- Platform-specific design (iOS/Android)
+
+Pages/Screens:
+1. Home Screen: [Description]
+2. Profile Screen: [Description]
+...
+
+{App Name} Design System Prompt
+
+Design Requirements:
+- Mobile-optimized UI
+- Touch-friendly interface
+- Platform-specific design patterns
+...
+```
+
+**Important for Mobile Projects:**
+- Use `@EXPO_BOILERPLATE.md` instead of `@REACT_BOILERPLATE.md`
+- Design considerations should account for iOS and Android differences
+- Touch targets must be at least 44x44 points
+- Handle safe areas (notches, navigation bars)
 
 ## Subsequent Prompts
 

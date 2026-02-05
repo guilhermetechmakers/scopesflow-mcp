@@ -79,3 +79,4 @@ curl -X POST https://your-site.netlify.app/.netlify/functions/mcp \
 
 For detailed information, see [NETLIFY_DEPLOYMENT.md](./NETLIFY_DEPLOYMENT.md)
 
+

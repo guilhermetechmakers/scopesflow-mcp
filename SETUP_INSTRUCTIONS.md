@@ -30,19 +30,9 @@ OPENAI_API_KEY=sk-your-actual-openai-api-key-here
 # MCP Server Configuration (Optional - defaults shown)
 MCP_SERVER_PORT=3001
 MCP_SERVER_HOST=localhost
-
-# VPS Configuration (Optional - for remote cursor-agent execution)
-# If these variables are set, cursor-agent will execute on the VPS instead of locally/WSL
-VPS_HOST=72.61.15.135
-VPS_USER=root
-VPS_PASSWORD=your-vps-password-here
-VPS_PORT=22
-VPS_PROJECT_BASE_PATH=/root/projects
 ```
 
-⚠️ **Important:** 
-- Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key from https://platform.openai.com/api-keys
-- If using VPS execution, replace `your-vps-password-here` with your actual VPS password (never commit this to git)
+⚠️ **Important:** Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key from https://platform.openai.com/api-keys
 
 ### 2. Install Dependencies (if not already done)
 
@@ -221,58 +211,13 @@ function MyComponent() {
 | `Project directory does not exist` | Ensure the project path is correct |
 | Connection refused on port 3001 | Check if another process is using port 3001, or change `MCP_SERVER_PORT` in `.env` |
 
-## 🌐 VPS Execution Setup (Optional)
-
-If you want to execute cursor-agent on a remote VPS instead of locally, follow these steps:
-
-### Prerequisites
-
-1. **Install sshpass** (required for password authentication):
-   - **Linux (Debian/Ubuntu)**: `sudo apt-get install sshpass`
-   - **macOS**: `brew install hudochenkov/sshpass/sshpass`
-   - **Windows**: Install Git Bash or use WSL, then install sshpass in WSL
-
-2. **Ensure cursor-agent is installed on VPS**:
-   ```bash
-   ssh root@72.61.15.135
-   curl https://cursor.com/install -fsS | bash
-   ```
-
-3. **Configure environment variables** in your `.env` file:
-   ```env
-   VPS_HOST=72.61.15.135
-   VPS_USER=root
-   VPS_PASSWORD=your-actual-password
-   VPS_PORT=22
-   VPS_PROJECT_BASE_PATH=/root/projects
-   ```
-
-### How It Works
-
-- When VPS configuration is detected, the server will:
-  1. Transfer prompt files to the VPS via SCP
-  2. Execute cursor-agent commands via SSH
-  3. Stream output back in real-time
-  4. Handle file synchronization automatically
-
-- **Path Handling**: 
-  - If `VPS_PROJECT_BASE_PATH` is set, projects are assumed to be under that path
-  - Otherwise, local paths are converted to VPS paths automatically
-
-### Security Notes
-
-- ⚠️ **Never commit your `.env` file** with VPS credentials to git
-- 🔒 Password is stored securely in environment variables (never logged)
-- 🔑 Consider setting up SSH key authentication for better security (future enhancement)
-
 ## 🎯 Next Steps
 
 1. ✅ Create `.env` file with your OpenAI API key
-2. ✅ (Optional) Configure VPS settings if using remote execution
-3. ✅ Start the MCP server: `npm start`
-4. ✅ Test project creation and AI code generation
-5. ⚠️ Fix React Flow warning in your frontend (see above)
-6. 📊 Monitor console logs for any issues
+2. ✅ Start the MCP server: `npm start`
+3. ✅ Test project creation and AI code generation
+4. ⚠️ Fix React Flow warning in your frontend (see above)
+5. 📊 Monitor console logs for any issues
 
 ## 💡 Tips
 

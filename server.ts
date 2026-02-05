@@ -6,7 +6,6 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 import { WebSocketServer } from 'ws';
-import { Client } from 'ssh2';
 
 // Load environment variables (optional now, not required for Cursor CLI)
 dotenv.config();
@@ -67,15 +66,7 @@ interface ProjectGitConfig {
   gitUserEmail?: string;
 }
 
-interface VPSConfig {
-  host: string;
-  user: string;
-  password: string;
-  port: number;
-  projectBasePath?: string;
-}
-
-export class CursorMCPServer {
+class CursorMCPServer {
   private server: Server;
   private wss: WebSocketServer | null = null;
   private toolHandlers: Map<string, (args: any) => Promise<any>> = new Map();
@@ -83,7 +74,6 @@ export class CursorMCPServer {
   private gitMutex: Promise<void> = Promise.resolve();
   private designPatternStorage: Map<string, string> = new Map();
   private temporaryDesignPatternStorage: Map<string, string> = new Map();
-  private vpsConfig: VPSConfig | null = null;
   
   // Build validation and auto-fix configuration
   private readonly MAX_BUILD_FIX_RETRIES = 10;
@@ -104,7 +94,6 @@ export class CursorMCPServer {
     );
 
     this.setupToolHandlers();
-    this.loadVPSConfig();
     this.checkCursorAgent();
     this.initializeDefaultDesignPatterns();
   }
@@ -250,167 +239,9 @@ This interface embodies:
     }
   }
 
-  // VPS Configuration Methods
-  private loadVPSConfig(): void {
-    const host = process.env.VPS_HOST;
-    const user = process.env.VPS_USER;
-    const password = process.env.VPS_PASSWORD;
-    const port = process.env.VPS_PORT ? parseInt(process.env.VPS_PORT, 10) : 22;
-    const projectBasePath = process.env.VPS_PROJECT_BASE_PATH;
-
-    if (host && user && password) {
-      this.vpsConfig = {
-        host,
-        user,
-        password,
-        port,
-        projectBasePath
-      };
-      console.log(`[MCP Server] ✓ VPS configuration loaded: ${user}@${host}:${port}`);
-    } else {
-      console.log('[MCP Server] No VPS configuration found, using local/WSL execution');
-    }
-  }
-
-  private getVPSConfig(): VPSConfig | null {
-    return this.vpsConfig;
-  }
-
-  private async executeSSHCommand(vpsConfig: VPSConfig, command: string): Promise<{ stdout: string; stderr: string }> {
-    return new Promise((resolve, reject) => {
-      const conn = new Client();
-      let stdout = '';
-      let stderr = '';
-
-      conn.on('ready', () => {
-          conn.exec(command, (err: Error | undefined, stream: any) => {
-          if (err) {
-            conn.end();
-            reject(err);
-            return;
-          }
-
-          stream.on('close', (code: number, signal: string) => {
-            conn.end();
-            if (code === 0) {
-              resolve({ stdout, stderr });
-            } else {
-              reject(new Error(`Command exited with code ${code}: ${stderr || stdout}`));
-            }
-          });
-
-          stream.on('data', (data: Buffer) => {
-            stdout += data.toString();
-          });
-
-          stream.stderr.on('data', (data: Buffer) => {
-            stderr += data.toString();
-          });
-        });
-      });
-
-      conn.on('error', (err) => {
-        reject(err);
-      });
-
-      conn.connect({
-        host: vpsConfig.host,
-        port: vpsConfig.port,
-        username: vpsConfig.user,
-        password: vpsConfig.password,
-        readyTimeout: 10000
-      });
-    });
-  }
-
-  private async testVPSConnection(vpsConfig: VPSConfig): Promise<boolean> {
-    try {
-      const result = await this.executeSSHCommand(vpsConfig, 'echo "Connection test"');
-      return result.stdout.trim() === 'Connection test';
-    } catch (error) {
-      console.warn(`[MCP Server] VPS connection test failed:`, error);
-      return false;
-    }
-  }
-
-  private async transferFileToVPS(localPath: string, remotePath: string, vpsConfig: VPSConfig): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const conn = new Client();
-      
-      conn.on('ready', () => {
-        conn.sftp((err: Error | undefined, sftp: any) => {
-          if (err) {
-            conn.end();
-            reject(err);
-            return;
-          }
-
-          sftp.fastPut(localPath, remotePath, (err: Error | undefined) => {
-            conn.end();
-            if (err) {
-              reject(err);
-            } else {
-              resolve();
-            }
-          });
-        });
-      });
-
-      conn.on('error', (err) => {
-        reject(err);
-      });
-
-      conn.connect({
-        host: vpsConfig.host,
-        port: vpsConfig.port,
-        username: vpsConfig.user,
-        password: vpsConfig.password,
-        readyTimeout: 10000
-      });
-    });
-  }
-
-  private convertToVPSPath(localPath: string, vpsConfig: VPSConfig): string {
-    // If projectBasePath is configured, assume projects are under that path
-    if (vpsConfig.projectBasePath) {
-      const projectName = path.basename(localPath);
-      return path.join(vpsConfig.projectBasePath, projectName).replace(/\\/g, '/');
-    }
-    
-    // Otherwise, assume the path structure matches (absolute paths on VPS)
-    // Convert Windows paths to Unix paths
-    return localPath.replace(/\\/g, '/').replace(/^([A-Z]):/i, (match, drive) => `/mnt/${drive.toLowerCase()}`);
-  }
-
   private async checkCursorAgent() {
     try {
-      // First check if VPS config is available
-      const vpsConfig = this.getVPSConfig();
-      
-      if (vpsConfig) {
-        console.log('[MCP Server] Checking cursor-agent on VPS...');
-        try {
-          const result = await this.executeSSHCommand(vpsConfig, '~/.local/bin/cursor-agent --version');
-          if (result.stdout && result.stdout.trim()) {
-            this.cursorAgentAvailable = true;
-            console.log(`[MCP Server] ✓ Cursor Agent CLI detected on VPS (version: ${result.stdout.trim()})`);
-            return;
-          } else {
-            console.warn(`[MCP Server] ⚠ SSH command succeeded but no output: ${result.stderr || 'no stderr'}`);
-          }
-        } catch (error: any) {
-          console.error(`[MCP Server] SSH command failed:`, error.message);
-          if (error.stderr) {
-            console.error(`[MCP Server] stderr: ${error.stderr}`);
-          }
-          if (error.stdout) {
-            console.error(`[MCP Server] stdout: ${error.stdout}`);
-          }
-          throw error;
-        }
-      }
-      
-      // Fallback to local/WSL check
+      // Check if running on Windows with WSL
       const isWindows = process.platform === 'win32';
       const command = isWindows 
         ? 'wsl -d Ubuntu bash -c "~/.local/bin/cursor-agent --version"'
@@ -418,20 +249,14 @@ This interface embodies:
       
       const { stdout } = await execAsync(command);
       this.cursorAgentAvailable = true;
-      console.log(`[MCP Server] ✓ Cursor Agent CLI detected and available locally (version: ${stdout.trim()})`);
+      console.log(`[MCP Server] ✓ Cursor Agent CLI detected and available (version: ${stdout.trim()})`);
     } catch (error) {
       this.cursorAgentAvailable = false;
       console.warn('[MCP Server] ⚠ Cursor Agent CLI not found.');
-      
-      const vpsConfig = this.getVPSConfig();
-      if (vpsConfig) {
-        console.warn('[MCP Server] Install cursor-agent on VPS with: curl https://cursor.com/install -fsS | bash');
+      if (process.platform === 'win32') {
+        console.warn('[MCP Server] Install with: wsl -d Ubuntu bash -c "curl https://cursor.com/install -fsS | bash"');
       } else {
-        if (process.platform === 'win32') {
-          console.warn('[MCP Server] Install with: wsl -d Ubuntu bash -c "curl https://cursor.com/install -fsS | bash"');
-        } else {
-          console.warn('[MCP Server] Install with: curl https://cursor.com/install -fsS | bash');
-        }
+        console.warn('[MCP Server] Install with: curl https://cursor.com/install -fsS | bash');
       }
       console.warn('[MCP Server] Code generation will use fallback mode.');
     }
@@ -448,15 +273,18 @@ This interface embodies:
     }
   }
 
-  private async generateCursorRules(designPattern?: string, projectPath?: string): Promise<string> {
+  private async generateCursorRules(designPattern?: string, projectPath?: string, framework?: string): Promise<string> {
     try {
       // Read BUILD_GUIDE.md content
       const buildGuideContent = await this.readBoilerplateFile('BUILD_GUIDE.md');
       
       if (!buildGuideContent) {
         console.warn('[MCP Server] BUILD_GUIDE.md not found, using minimal rules');
-        return await this.getMinimalCursorRules(designPattern, projectPath);
+        return await this.getMinimalCursorRules(designPattern, projectPath, framework);
       }
+
+      // Check if this is an Expo/mobile project
+      const isExpoProject = framework === 'react-expo';
 
       // Always include the master design reference content
       const masterDesignReference = await this.readBoilerplateFile('DESIGN_REFERENCE.md');
@@ -485,6 +313,33 @@ Ensure all implementations align with this pattern's best practices.
       }
 
       // Add core rules from BUILD_GUIDE.md
+      if (isExpoProject) {
+        rulesContent += `## Tech Stack Requirements
+
+- **Framework:** React Native with Expo and TypeScript
+- **Build Tool:** Expo CLI
+- **Styling:** NativeWind (Tailwind CSS for React Native)
+- **UI Components:** React Native components with NativeWind styling
+- **Animations:** React Native Animated API or Reanimated
+- **Icons:** Expo Vector Icons or React Native Vector Icons
+- **State Management:** React Context or Zustand
+- **Forms:** React Hook Form with Zod validation
+- **HTTP Client:** Native fetch or Axios
+- **Navigation:** React Navigation (if needed)
+- **Notifications:** Expo Notifications
+
+## Critical Setup Rules
+
+1. **ALWAYS run \`npm install\` before any build commands**
+2. Use NativeWind for styling (Tailwind CSS for React Native)
+3. Use React Native components (View, Text, ScrollView, etc.) instead of HTML elements
+4. Use \`@/\` path aliases for imports
+5. Follow React Native best practices for performance
+6. Handle safe areas for iOS and Android
+7. Use Platform.select() for platform-specific code
+8. Environment variables must use EXPO_PUBLIC_ prefix
+`;
+      } else {
       rulesContent += `## Tech Stack Requirements
 
 - **Framework:** React 18 with TypeScript
@@ -506,7 +361,10 @@ Ensure all implementations align with this pattern's best practices.
 4. Use Tailwind v3 with tailwind.config.js (not CSS-based config)
 5. Use \`@/\` path aliases for imports
 6. Use Shadcn components instead of custom UI components
+`;
+      }
 
+      rulesContent += `
 ## Code Style
 
 - Write concise, technical TypeScript code
@@ -514,19 +372,20 @@ Ensure all implementations align with this pattern's best practices.
 - Favor iteration and modularization over duplication
 - Use descriptive variable names with auxiliary verbs (isLoading, hasError)
 - Structure: exported components, subcomponents, helpers, types
-- Minimize \`useEffect\` and \`useState\`; favor React Server Components where possible
+${isExpoProject ? '- Use React Native hooks and patterns (useState, useEffect, useCallback, useMemo)' : '- Minimize \`useEffect\` and \`useState\`; favor React Server Components where possible'}
 
 ## API Layer Pattern
 
 - Centralize API calls in \`src/api/\` directory
-- Use Axios with interceptors for auth and error handling
-- Create React Query hooks in \`src/hooks/\`
-- Implement proper error handling with toast notifications
+${isExpoProject ? '- Use native fetch() or Axios with proper error handling' : '- Use Axios with interceptors for auth and error handling'}
+${isExpoProject ? '- Create custom hooks in \`src/hooks/\` for data fetching' : '- Create React Query hooks in \`src/hooks/\`'}
+- Implement proper error handling${isExpoProject ? ' with user-friendly error messages' : ' with toast notifications'}
 - Use TypeScript types for all API responses
 
 ## Design System
 
-${designPattern ? this.getDesignPatternGuidelines(designPattern) : ''}
+${designPattern ? this.getDesignPatternGuidelines(designPattern, isExpoProject) : ''}
+${isExpoProject ? this.getMobileDesignGuidelines() : ''}
 
 ---
 
@@ -548,26 +407,31 @@ ${designReferenceContent}
 
 ## Component Patterns
 
-- Wrap all pages with animation components
-- Use \`cn()\` utility for conditional classes
-- Implement loading skeletons (not spinners)
-- Create helpful empty states with illustrations
+${isExpoProject ? '- Use React Native components: View, Text, ScrollView, FlatList, etc.' : '- Wrap all pages with animation components'}
+- Use \`cn()\` utility for conditional classes (with NativeWind for mobile)
+${isExpoProject ? '- Implement loading states with ActivityIndicator' : '- Implement loading skeletons (not spinners)'}
+- Create helpful empty states${isExpoProject ? ' with appropriate icons' : ' with illustrations'}
 - Add error boundaries for robust error handling
+${isExpoProject ? '- Use FlatList for long lists (built-in virtualization)' : ''}
+${isExpoProject ? '- Handle keyboard avoidance with KeyboardAvoidingView' : ''}
 
 ## Performance & Best Practices
 
-- Optimize images: WebP format, lazy loading
-- Implement code splitting with dynamic imports
+${isExpoProject ? '- Optimize images: Use Expo Image component for better performance' : '- Optimize images: WebP format, lazy loading'}
+${isExpoProject ? '- Use React.memo() and useMemo() to minimize re-renders' : '- Implement code splitting with dynamic imports'}
 - Use proper memoization to minimize re-renders
 - Debounce search inputs
-- Virtualize long lists
-- Respect prefers-reduced-motion
+${isExpoProject ? '- Use FlatList for lists (automatic virtualization)' : '- Virtualize long lists'}
+${isExpoProject ? '- Handle safe areas for iOS notch and Android navigation bar' : '- Respect prefers-reduced-motion'}
+${isExpoProject ? '- Use Platform.select() for platform-specific implementations' : ''}
 
 ## Testing
 
 - Write unit tests for components
 - Mock API interactions in tests
 - Test error scenarios and edge cases
+${isExpoProject ? '- Use React Native Testing Library for component tests' : ''}
+${isExpoProject ? '- Test platform-specific behavior (iOS vs Android)' : ''}
 
 ---
 
@@ -577,41 +441,76 @@ For complete reference, see BUILD_GUIDE.md in the project root.
       return rulesContent;
     } catch (error) {
       console.error('[MCP Server] Error generating cursor rules:', error);
-      return await this.getMinimalCursorRules(designPattern, projectPath);
+      return await this.getMinimalCursorRules(designPattern, projectPath, framework);
     }
   }
 
-  private getDesignPatternGuidelines(pattern: string): string {
+  private getMobileDesignGuidelines(): string {
+    return `
+## Mobile-Specific Design Guidelines
+
+### Touch Targets
+- Minimum touch target size: 44x44 points (iOS) or 48x48 dp (Android)
+- Provide adequate spacing between interactive elements
+- Use larger touch targets for primary actions
+
+### Platform Considerations
+- Use Platform.select() for platform-specific styling
+- Handle iOS safe areas (notch, status bar) using SafeAreaView or useSafeAreaInsets
+- Handle Android navigation bar and status bar
+- Test on both iOS and Android devices/simulators
+
+### Navigation Patterns
+- Use React Navigation for app navigation
+- Implement bottom tabs for primary navigation (iOS/Android standard)
+- Use drawer navigation for secondary navigation
+- Handle deep linking and navigation state
+
+### Performance
+- Use FlatList for long lists (automatic virtualization)
+- Optimize images with Expo Image component
+- Use React.memo() for expensive components
+- Implement proper lazy loading for screens
+
+### Accessibility
+- Use accessibilityLabel for screen readers
+- Provide accessibilityHint for complex interactions
+- Ensure sufficient color contrast
+- Support dynamic type sizes (iOS) and font scaling (Android)
+`;
+  }
+
+  private getDesignPatternGuidelines(pattern: string, isMobile: boolean = false): string {
     const patternLower = pattern.toLowerCase();
     
     if (patternLower.includes('dashboard')) {
       return `### Dashboard-Specific Guidelines
 
-- Use collapsible sidebar navigation
-- Implement data tables with sorting, filtering, and pagination
+${isMobile ? '- Use bottom tab navigation or drawer navigation' : '- Use collapsible sidebar navigation'}
+${isMobile ? '- Implement scrollable lists with pull-to-refresh' : '- Implement data tables with sorting, filtering, and pagination'}
 - Create metric cards with trend indicators
-- Use charts (Recharts) for data visualization
-- Ensure responsive layout (sidebar → drawer on mobile)
-- Add loading skeletons for data fetching states
+${isMobile ? '- Use React Native chart libraries (victory-native, react-native-chart-kit)' : '- Use charts (Recharts) for data visualization'}
+${isMobile ? '- Ensure full-screen layouts optimized for mobile screens' : '- Ensure responsive layout (sidebar → drawer on mobile)'}
+- Add loading states for data fetching
 `;
     } else if (patternLower.includes('landing') || patternLower.includes('marketing')) {
       return `### Landing Page-Specific Guidelines
 
-- Create engaging hero sections with animated gradients or interactive backgrounds
-- Use bento grids or masonry layouts for feature sections
-- Implement scroll animations (fade-in, slide-up, parallax)
-- Design prominent CTAs with hover effects and animations
+${isMobile ? '- Create engaging hero sections optimized for mobile screens' : '- Create engaging hero sections with animated gradients or interactive backgrounds'}
+${isMobile ? '- Use vertical scrollable layouts with sections' : '- Use bento grids or masonry layouts for feature sections'}
+${isMobile ? '- Implement scroll animations using Animated API' : '- Implement scroll animations (fade-in, slide-up, parallax)'}
+${isMobile ? '- Design prominent CTAs with touch-friendly sizes (minimum 44x44 points)' : '- Design prominent CTAs with hover effects and animations'}
 - Add social proof sections
 - Ensure fast loading and optimal performance
 `;
     } else if (patternLower.includes('saas')) {
       return `### SaaS App-Specific Guidelines
 
-- Implement clear authentication flows
-- Create intuitive onboarding experience
+- Implement clear authentication flows${isMobile ? ' optimized for mobile input' : ''}
+- Create intuitive onboarding experience${isMobile ? ' with swipeable screens' : ''}
 - Design settings pages with clear sections
 - Use progressive disclosure for complex features
-- Add helpful tooltips and documentation links
+${isMobile ? '- Add helpful tooltips using React Native tooltip libraries' : '- Add helpful tooltips and documentation links'}
 - Implement billing/subscription management UI
 `;
     }
@@ -619,10 +518,12 @@ For complete reference, see BUILD_GUIDE.md in the project root.
     return '';
   }
 
-  private async getMinimalCursorRules(designPattern?: string, projectPath?: string): Promise<string> {
+  private async getMinimalCursorRules(designPattern?: string, projectPath?: string, framework?: string): Promise<string> {
     // Always include the master design reference content
     const masterDesignReference = await this.readBoilerplateFile('DESIGN_REFERENCE.md');
     const designReferenceContent = masterDesignReference || '### Design Guidelines\n\n- Use modern, bold designs with unique layouts\n- Implement smooth animations and transitions\n- Ensure mobile-first responsive design\n- Add hover states and micro-interactions to all interactive elements\n- Use gradients and depth (shadows) for visual hierarchy\n- Maintain consistent spacing scale: 4px, 8px, 16px, 24px, 32px, 48px, 64px\n- Ensure accessibility (keyboard navigation, ARIA labels, color contrast)';
+
+    const isExpoProject = framework === 'react-expo';
 
     return `---
 alwaysApply: true
@@ -633,18 +534,18 @@ alwaysApply: true
 ${designPattern ? `## Design Pattern: ${designPattern}\n\n` : ''}
 
 ## Tech Stack
-- React 18 + TypeScript
-- Vite + SWC
-- Tailwind CSS v3
-- Shadcn/ui + Motion
-- React Query + Axios
+${isExpoProject ? '- React Native + Expo + TypeScript' : '- React 18 + TypeScript'}
+${isExpoProject ? '- Expo CLI' : '- Vite + SWC'}
+${isExpoProject ? '- NativeWind (Tailwind for React Native)' : '- Tailwind CSS v3'}
+${isExpoProject ? '- React Native Components' : '- Shadcn/ui + Motion'}
+${isExpoProject ? '- Native fetch/Axios' : '- React Query + Axios'}
 
 ## Critical Rules
 1. Always run \`npm install\` before build commands
-2. Use Motion library for animations
-3. Import Inter font in CSS
+${isExpoProject ? '2. Use NativeWind for styling' : '2. Use Motion library for animations'}
+${isExpoProject ? '3. Use React Native components (View, Text, etc.)' : '3. Import Inter font in CSS'}
 4. Use \`@/\` path aliases
-5. Follow mobile-first responsive design
+${isExpoProject ? '5. Handle safe areas for iOS and Android' : '5. Follow mobile-first responsive design'}
 
 ---
 
@@ -660,15 +561,18 @@ See BUILD_GUIDE.md for complete guidelines.
 `;
   }
 
-  private async generateDesignRules(designPattern?: string): Promise<string> {
+  private async generateDesignRules(designPattern?: string, framework?: string): Promise<string> {
     try {
       // Read DESIGN_RULES.md master file
       const designRulesContent = await this.readBoilerplateFile('DESIGN_RULES.md');
       
       if (!designRulesContent) {
         console.warn('[MCP Server] DESIGN_RULES.md not found, using minimal design rules');
-        return this.getMinimalDesignRules(designPattern);
+        return this.getMinimalDesignRules(designPattern, framework);
       }
+
+      // Check if this is an Expo/mobile project
+      const isExpoProject = framework === 'react-expo';
 
       // Generate project-specific design_rules.md
       let rulesContent = `# Design Rules for This Project\n\n`;
@@ -691,11 +595,17 @@ See BUILD_GUIDE.md for complete guidelines.
       // Add general design principles
       rulesContent += `## General Design Principles\n\n`;
       rulesContent += this.extractGeneralPrinciples(designRulesContent);
+      
+      // Add mobile-specific design guidelines if Expo project
+      if (isExpoProject) {
+        rulesContent += `\n---\n\n## Mobile-Specific Design Guidelines\n\n`;
+        rulesContent += this.getMobileDesignGuidelines();
+      }
 
       return rulesContent;
     } catch (error) {
       console.error('[MCP Server] Error generating design rules:', error);
-      return this.getMinimalDesignRules(designPattern);
+      return this.getMinimalDesignRules(designPattern, framework);
     }
   }
 
@@ -751,15 +661,20 @@ See BUILD_GUIDE.md for complete guidelines.
     return principles;
   }
 
-  private getMinimalDesignRules(designPattern?: string): string {
+  private getMinimalDesignRules(designPattern?: string, framework?: string): string {
+    const isExpoProject = framework === 'react-expo';
+    
     return `# Design Rules for This Project
 
 ${designPattern ? `## Project Design Pattern: ${designPattern}\n\n` : ''}
 
 ## Key Principles
 
-1. Mobile-first responsive design
+${isExpoProject ? '1. Mobile-native design optimized for iOS and Android' : '1. Mobile-first responsive design'}
 2. Smooth animations and transitions
+${isExpoProject ? '3. Touch-friendly interface with adequate target sizes (44x44 points minimum)' : '3. Touch-friendly interface'}
+${isExpoProject ? '4. Platform-specific design patterns (iOS vs Android)' : '4. Platform-agnostic design'}
+${isExpoProject ? '5. Safe area handling for notches and navigation bars' : '5. Safe area handling'}
 3. Accessible (keyboard nav, ARIA, contrast)
 4. Modern, bold designs
 5. Consistent spacing and typography
@@ -1297,22 +1212,27 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       // Create project directory
       await fs.mkdir(config.projectPath, { recursive: true });
       
-      // Initialize project based on framework
+      // Initialize project based on template (takes precedence) or framework
       let initCommand = '';
       const projectName = path.basename(config.projectPath);
-      
-      switch (config.framework) {
+      const template = (config.template || '').toLowerCase();
+      const useVite = template === 'vite-react-ts' || template === 'react-ts' || template.startsWith('vite-');
+
+      if (useVite || config.framework === 'vite') {
+        const viteTemplate = template.includes('vue') ? 'vue-ts' : 'react-ts';
+        initCommand = `npm create vite@latest "${projectName}" -- --template ${viteTemplate}`;
+      } else switch (config.framework) {
         case 'react':
           initCommand = `npx create-react-app "${projectName}" --template typescript`;
-          break;
-        case 'vite':
-          initCommand = `npm create vite@latest "${projectName}" -- --template react-ts`;
           break;
         case 'nextjs':
           initCommand = `npx create-next-app@latest "${projectName}" --typescript --tailwind --eslint`;
           break;
         case 'vue':
           initCommand = `npm create vue@latest "${projectName}"`;
+          break;
+        case 'react-expo':
+          initCommand = `npx create-expo-app@latest "${projectName}" --template blank-typescript`;
           break;
         default:
           // For default case, just create a basic project structure
@@ -1335,7 +1255,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       if (initCommand) {
         const { stdout, stderr } = await execAsync(initCommand, {
           cwd: parentDir,
-          timeout: 120000 // 2 minutes
+          timeout: 300000 // 5 minutes (CRA/Vite can be slow on first run)
         });
         console.log(`[MCP Server] Project creation output:`, stdout);
       }
@@ -1437,10 +1357,20 @@ See DESIGN_RULES.md in the server root for complete guidelines.
 
       // Create .env.local file with Supabase credentials if provided
       if (config.supabaseUrl && config.supabaseServiceRoleKey) {
-        const envContent = `VITE_SUPABASE_URL=${config.supabaseUrl}\nVITE_SUPABASE_ANON_KEY=${config.supabaseServiceRoleKey}\n`;
-        const envPath = path.join(config.projectPath, '.env.local');
+        let envContent: string;
+        let envPath: string;
+        
+        if (config.framework === 'react-expo') {
+          // Expo requires EXPO_PUBLIC_ prefix, but also support VITE_ for compatibility
+          envContent = `EXPO_PUBLIC_SUPABASE_URL=${config.supabaseUrl}\nEXPO_PUBLIC_SUPABASE_ANON_KEY=${config.supabaseServiceRoleKey}\nVITE_SUPABASE_URL=${config.supabaseUrl}\nVITE_SUPABASE_ANON_KEY=${config.supabaseServiceRoleKey}\n`;
+          envPath = path.join(config.projectPath, '.env');
+        } else {
+          envContent = `VITE_SUPABASE_URL=${config.supabaseUrl}\nVITE_SUPABASE_ANON_KEY=${config.supabaseServiceRoleKey}\n`;
+          envPath = path.join(config.projectPath, '.env.local');
+        }
+        
         await fs.writeFile(envPath, envContent, 'utf-8');
-        console.log('[MCP Server] ✅ Created .env.local with Supabase credentials');
+        console.log(`[MCP Server] ✅ Created ${path.basename(envPath)} with Supabase credentials`);
       }
 
       // Create a basic README.md file to ensure the directory is properly initialized
@@ -1454,13 +1384,13 @@ See DESIGN_RULES.md in the server root for complete guidelines.
         await fs.mkdir(cursorRulesDir, { recursive: true });
 
         // Generate and write projectrules.mdc
-        const cursorRulesContent = await this.generateCursorRules(combinedDesignPattern, config.projectPath);
+        const cursorRulesContent = await this.generateCursorRules(combinedDesignPattern, config.projectPath, config.framework);
         const projectRulesPath = path.join(cursorRulesDir, 'projectrules.mdc');
         await fs.writeFile(projectRulesPath, cursorRulesContent, 'utf-8');
         console.log(`[MCP Server] ✅ Created .cursor/rules/projectrules.mdc${combinedDesignPattern ? ` with design pattern: ${combinedDesignPattern.substring(0, 50)}...` : ''}`);
 
         // Generate and write design_rules.md
-        const designRulesContent = await this.generateDesignRules(combinedDesignPattern);
+        const designRulesContent = await this.generateDesignRules(combinedDesignPattern, config.framework);
         const designRulesPath = path.join(config.projectPath, 'design_rules.md');
         await fs.writeFile(designRulesPath, designRulesContent, 'utf-8');
         console.log('[MCP Server] ✅ Created design_rules.md with pattern-specific guidelines');
@@ -1470,13 +1400,24 @@ See DESIGN_RULES.md in the server root for complete guidelines.
         // Don't fail the entire operation, but log the issue
       }
 
-      // Validate and fix Tailwind v3 setup
+      // Validate and fix Tailwind v3 setup (skip for Expo projects - they use NativeWind)
+      if (config.framework !== 'react-expo') {
       try {
         await this.validateAndFixTailwindV3(config.projectPath);
         console.log(`[MCP Server] ✅ Tailwind v3 validation completed for ${config.projectName}`);
       } catch (validationError) {
         console.warn(`[MCP Server] ⚠️ Tailwind v3 validation failed for ${config.projectName}:`, validationError);
         // Don't fail the entire operation, but log the issue
+        }
+      } else {
+        // Setup NativeWind for Expo projects
+        try {
+          await this.setupNativeWindForExpo(config.projectPath);
+          console.log(`[MCP Server] ✅ NativeWind setup completed for ${config.projectName}`);
+        } catch (nativeWindError) {
+          console.warn(`[MCP Server] ⚠️ NativeWind setup failed for ${config.projectName}:`, nativeWindError);
+          // Don't fail the entire operation, but log the issue
+        }
       }
 
       // Open project in Cursor (optional)
@@ -1677,23 +1618,15 @@ When implementing this project:
       // 3. Apply changes directly to the project
       console.log(`[MCP Server] Calling cursor-agent CLI...`);
       
-      // Build command based on platform and VPS configuration
-      const vpsConfig = this.getVPSConfig();
+      // Build command based on platform
       const isWindows = process.platform === 'win32';
       let command: string;
       let actualProjectPath = args.projectPath;
-      let useVPS = false;
       
       // Resolve relative paths to absolute paths
       if (!path.isAbsolute(args.projectPath)) {
         actualProjectPath = path.resolve(process.cwd(), args.projectPath);
         console.log(`[MCP Server] Resolved path: ${actualProjectPath}`);
-      }
-      
-      // Determine if we should use VPS
-      if (vpsConfig) {
-        useVPS = true;
-        console.log(`[MCP Server] Using VPS execution: ${vpsConfig.user}@${vpsConfig.host}`);
       }
       
       // Check for Supabase configuration
@@ -1733,6 +1666,7 @@ REQUIRED SUPABASE SETUP:
 2. Create src/lib/supabase.ts with proper client initialization
 3. Use environment variables from .env.local (import.meta.env.VITE_SUPABASE_URL and import.meta.env.VITE_SUPABASE_ANON_KEY)
 4. Follow Supabase best practices for auth and data fetching
+5. Use Edge Functions for LLM and any server-only or secret-using logic; invoke with supabase.functions.invoke('function-name', { body }). Never expose LLM or third-party API keys in the client.
 
 Note: Database migrations will be handled in subsequent prompts when database features are needed.
 
@@ -1755,6 +1689,7 @@ REQUIRED SUPABASE SETUP:
 6. Integrate Supabase auth with the app's authentication system if needed
 7. Use React Query or similar for data fetching with Supabase
 8. Implement proper error handling for Supabase operations
+9. Use Edge Functions for LLM and any server-only or secret-using logic; invoke with supabase.functions.invoke('function-name', { body }). Never expose LLM or third-party API keys in the client.
 
 === DATABASE MIGRATION WORKFLOW (CRITICAL) ===
 
@@ -2012,6 +1947,7 @@ IMPLEMENTATION INSTRUCTIONS:
 14. Use Sonner for toast notifications
 15. Build the design system based on Design Reference specifications above
 16. Implement the user's requirements: ${args.prompt}
+17. When Supabase is configured: use Edge Functions for LLM calls and server-only logic; never expose LLM or third-party API keys in the client.
 
 START IMPLEMENTING NOW. Do not ask questions - analyze the existing project and build according to the specifications above.`;
         } else {
@@ -2098,6 +2034,7 @@ CRITICAL TECHNICAL REQUIREMENTS:
 - Native fetch() with API utilities in src/lib/api.ts
 - Design system with CSS custom properties
 - Use RGB color values for theming
+- When Supabase is configured: use Edge Functions for LLM and server-only logic; never expose API keys in the client
 ${supabaseInstructions}
 === TASK ===
 ${args.prompt}
@@ -2110,28 +2047,7 @@ IMPORTANT: ALL styling and design decisions must follow the Design Reference sec
 Analyze the existing project structure and implement the task following the patterns already established. Ensure all success criteria are met.`;
       }
       
-      if (useVPS && vpsConfig) {
-        // VPS execution: Convert path and build SSH command
-        const vpsProjectPath = this.convertToVPSPath(actualProjectPath, vpsConfig);
-        console.log(`[MCP Server] VPS path: ${vpsProjectPath}`);
-        
-        // Save prompt to a temporary file locally first
-        const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
-        await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
-        
-        // Transfer prompt file to VPS
-        const vpsPromptFile = `${vpsProjectPath}/.cursor-prompt.tmp`;
-        try {
-          await this.transferFileToVPS(tempPromptFile, vpsPromptFile, vpsConfig);
-          console.log(`[MCP Server] ✓ Prompt file transferred to VPS`);
-        } catch (error) {
-          console.error(`[MCP Server] Failed to transfer prompt file to VPS:`, error);
-          throw new Error(`Failed to transfer prompt file to VPS: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-        
-        // Command will be executed via SSH2 in the try block below
-        command = `cd '${vpsProjectPath}' && cat '.cursor-prompt.tmp' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model auto`;
-      } else if (isWindows) {
+      if (isWindows) {
         // Convert absolute Windows path to WSL path
         const wslProjectPath = actualProjectPath
           .replace(/\\/g, '/')
@@ -2165,25 +2081,15 @@ Analyze the existing project structure and implement the task following the patt
       let cursorAgentLogs: Array<{ timestamp: string; type: string; message: string; data?: any }> = [];
       
       try {
-        if (useVPS && vpsConfig) {
-          // Execute on VPS using SSH2
-          const result = await this.executeCursorAgentStreamingSSH(vpsConfig, command, args.timeout || 300000);
-          stdout = result.stdout;
-          stderr = result.stderr;
-          cursorAgentLogs = result.logs;
-          console.log(`[MCP Server] 📊 Captured ${cursorAgentLogs.length} log entries from cursor-agent`);
-        } else if (command) {
-          // Execute locally
-          const result = await this.executeCursorAgentStreaming(
-            command,
-            isWindows ? undefined : actualProjectPath,
-            args.timeout || 300000 // 5 minute default
-          );
-          stdout = result.stdout;
-          stderr = result.stderr;
-          cursorAgentLogs = result.logs;
-          console.log(`[MCP Server] 📊 Captured ${cursorAgentLogs.length} log entries from cursor-agent`);
-        }
+        const result = await this.executeCursorAgentStreaming(
+          command,
+          isWindows ? undefined : actualProjectPath,
+          args.timeout || 300000 // 5 minute default
+        );
+        stdout = result.stdout;
+        stderr = result.stderr;
+        cursorAgentLogs = result.logs;
+        console.log(`[MCP Server] 📊 Captured ${cursorAgentLogs.length} log entries from cursor-agent`);
       } catch (error: any) {
         // Check if this is a timeout error
         const isTimeoutError = error.message?.includes('timed out') || 
@@ -3137,14 +3043,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       // This resolves common issues with missing dependencies or TypeScript not being found
       console.log('[MCP Server] 🔍 Ensuring dependencies are installed...');
       try {
-        const vpsConfig = this.getVPSConfig();
-        
-        if (vpsConfig) {
-          // Run npm install on VPS
-          const vpsProjectPath = this.convertToVPSPath(actualProjectPath, vpsConfig);
-          const remoteCommand = `cd '${vpsProjectPath}' && npm install`;
-          await this.executeSSHCommand(vpsConfig, remoteCommand);
-        } else if (isWindows) {
+        if (isWindows) {
           // Run npm install in WSL for Windows projects
           const wslProjectPath = actualProjectPath
             .replace(/\\/g, '/')
@@ -3169,31 +3068,8 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const tempPromptFile = path.join(actualProjectPath, '.cursor-fix-prompt.tmp');
       await fs.writeFile(tempPromptFile, fixPrompt, 'utf-8');
       
-      // Check if VPS config is available
-      const vpsConfig = this.getVPSConfig();
       let command: string;
-      let useVPS = false;
-      
-      if (vpsConfig) {
-        useVPS = true;
-        // VPS execution: Convert path and build SSH command
-        const vpsProjectPath = this.convertToVPSPath(actualProjectPath, vpsConfig);
-        
-        // Transfer prompt file to VPS
-        const vpsPromptFile = `${vpsProjectPath}/.cursor-fix-prompt.tmp`;
-        try {
-          await this.transferFileToVPS(tempPromptFile, vpsPromptFile, vpsConfig);
-          console.log(`[MCP Server] ✓ Fix prompt file transferred to VPS`);
-        } catch (error) {
-          console.error(`[MCP Server] Failed to transfer fix prompt file to VPS:`, error);
-          throw new Error(`Failed to transfer fix prompt file to VPS: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-        
-        // Execute cursor-agent on VPS using SSH2 streaming
-        const remoteCommand = `cd '${vpsProjectPath}' && cat '.cursor-fix-prompt.tmp' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model auto`;
-        await this.executeCursorAgentStreamingSSH(vpsConfig, remoteCommand, 300000);
-        command = ''; // Set empty to skip local execution
-      } else if (isWindows) {
+      if (isWindows) {
         const wslProjectPath = actualProjectPath
           .replace(/\\/g, '/')
           .replace(/^([A-Z]):/i, (match, drive) => `/mnt/${drive.toLowerCase()}`);
@@ -3206,14 +3082,11 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       
       console.log(`[MCP Server] Executing cursor-agent to fix errors...`);
       
-      // Only execute locally if not using VPS
-      if (!useVPS && command) {
-        await this.executeCursorAgentStreaming(
-          command,
-          isWindows ? undefined : actualProjectPath,
-          300000 // 5 minutes
-        );
-      }
+      await this.executeCursorAgentStreaming(
+        command,
+        isWindows ? undefined : actualProjectPath,
+        300000 // 5 minutes
+      );
       
       // Clean up temp file
       try {
@@ -3249,182 +3122,6 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       // Retry
       return await this.autoFixBuildErrors(projectPath, errorDetails, retryCount + 1);
     }
-  }
-
-  /**
-   * Execute cursor-agent command on VPS with real-time streaming output via SSH2
-   */
-  private async executeCursorAgentStreamingSSH(
-    vpsConfig: VPSConfig,
-    remoteCommand: string,
-    timeout: number
-  ): Promise<{ stdout: string; stderr: string; logs: Array<{ timestamp: string; type: string; message: string; data?: any }> }> {
-    return new Promise((resolve, reject) => {
-      const conn = new Client();
-      let stdout = '';
-      let stderr = '';
-      let stdoutBuffer = '';
-      let timedOut = false;
-      const logs: Array<{ timestamp: string; type: string; message: string; data?: any }> = [];
-      const startTime = Date.now();
-      
-      const addLog = (type: string, message: string, data?: any) => {
-        logs.push({
-          timestamp: new Date().toISOString(),
-          type,
-          message,
-          data
-        });
-      };
-
-      console.log('[MCP Server] Starting cursor-agent on VPS with streaming output...');
-      addLog('info', 'Starting cursor-agent on VPS with streaming output');
-
-      const timeoutHandle = setTimeout(() => {
-        timedOut = true;
-        const msg = 'Cursor-agent timed out, terminating process...';
-        console.log(`[MCP Server] ⚠ ${msg}`);
-        addLog('warning', msg);
-        conn.end();
-      }, timeout);
-
-      conn.on('ready', () => {
-        conn.exec(remoteCommand, (err, stream) => {
-          if (err) {
-            clearTimeout(timeoutHandle);
-            conn.end();
-            reject(err);
-            return;
-          }
-
-          stream.on('data', (data: Buffer) => {
-            const text = data.toString();
-            stdout += text;
-            stdoutBuffer += text;
-            
-            // Process complete lines for JSON streaming
-            const lines = stdoutBuffer.split('\n');
-            stdoutBuffer = lines.pop() || '';
-            
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              
-              try {
-                const jsonData = JSON.parse(line);
-                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                
-                // Log different event types (same as local execution)
-                if (jsonData.type === 'status') {
-                  const msg = jsonData.message || JSON.stringify(jsonData);
-                  console.log(`[Cursor Agent] Status: ${msg}`);
-                  addLog('agent_status', msg, { elapsed, raw: jsonData });
-                } else if (jsonData.type === 'file_change' || jsonData.type === 'file') {
-                  const path = jsonData.path || jsonData.file || JSON.stringify(jsonData);
-                  console.log(`[Cursor Agent] File: ${path}`);
-                  addLog('agent_file', `File modified: ${path}`, { elapsed, path, raw: jsonData });
-                } else if (jsonData.type === 'thinking' || jsonData.type === 'thought') {
-                  const thought = jsonData.content || jsonData.message || '...';
-                  console.log(`[Cursor Agent] Thinking: ${thought}`);
-                  addLog('agent_thinking', thought, { elapsed, raw: jsonData });
-                } else if (jsonData.type === 'error') {
-                  const errMsg = jsonData.message || JSON.stringify(jsonData);
-                  console.error(`[Cursor Agent] Error: ${errMsg}`);
-                  addLog('agent_error', errMsg, { elapsed, raw: jsonData });
-                } else if (jsonData.type === 'completion' || jsonData.type === 'done') {
-                  const msg = jsonData.message || 'Done';
-                  console.log(`[Cursor Agent] Completed: ${msg}`);
-                  addLog('agent_completion', msg, { elapsed, raw: jsonData });
-                } else if (jsonData.type === 'delta' || jsonData.type === 'text_delta') {
-                  const deltaText = jsonData.content || jsonData.text || jsonData.delta || '';
-                  if (deltaText) {
-                    process.stdout.write(deltaText);
-                    addLog('agent_delta', deltaText, { elapsed, raw: jsonData });
-                  }
-                } else if (jsonData.type === 'tool_call') {
-                  const toolInfo = JSON.stringify(jsonData).substring(0, 200);
-                  console.log(`[Cursor Agent] Tool Call: ${toolInfo}`);
-                  addLog('agent_tool_call', toolInfo, { elapsed, raw: jsonData });
-                } else if (jsonData.type === 'assistant') {
-                  const content = jsonData.message?.content || jsonData.content || '';
-                  const preview = typeof content === 'string' ? content.substring(0, 100) : JSON.stringify(content).substring(0, 100);
-                  console.log(`[Cursor Agent] Assistant: ${preview}`);
-                  addLog('agent_assistant', preview, { elapsed, raw: jsonData });
-                } else {
-                  const eventInfo = JSON.stringify(jsonData).substring(0, 200);
-                  console.log(`[Cursor Agent] ${jsonData.type || 'Event'}: ${eventInfo}`);
-                  addLog('agent_event', eventInfo, { elapsed, eventType: jsonData.type, raw: jsonData });
-                }
-              } catch (parseError) {
-                if (line.trim()) {
-                  console.log(`[Cursor Agent] ${line}`);
-                  addLog('agent_output', line);
-                }
-              }
-            }
-          });
-
-          stream.stderr.on('data', (data: Buffer) => {
-            const text = data.toString();
-            stderr += text;
-            
-            const lines = text.split('\n').filter(l => l.trim());
-            for (const line of lines) {
-              console.error(`[Cursor Agent] stderr: ${line}`);
-              addLog('agent_stderr', line);
-            }
-          });
-
-          stream.on('close', (code: number, signal: string) => {
-            clearTimeout(timeoutHandle);
-            conn.end();
-            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-            
-            // Process any remaining buffer
-            if (stdoutBuffer.trim()) {
-              try {
-                const jsonData = JSON.parse(stdoutBuffer);
-                const preview = JSON.stringify(jsonData).substring(0, 200);
-                console.log(`[Cursor Agent] Final: ${preview}`);
-                addLog('agent_final', preview, { raw: jsonData });
-              } catch {
-                console.log(`[Cursor Agent] ${stdoutBuffer}`);
-                addLog('agent_output', stdoutBuffer);
-              }
-            }
-            
-            if (timedOut) {
-              const msg = 'Cursor-agent timed out but may have completed work';
-              console.log(`[MCP Server] ⚠ ${msg}`);
-              addLog('warning', msg, { elapsed, exitCode: code, signal });
-              resolve({ stdout, stderr, logs });
-            } else if (code !== 0 && code !== null) {
-              const msg = `Cursor-agent exited with code ${code}`;
-              console.log(`[MCP Server] ${msg}`);
-              addLog('warning', msg, { elapsed, exitCode: code, signal });
-              resolve({ stdout, stderr, logs });
-            } else {
-              const msg = 'Cursor-agent completed successfully';
-              console.log(`[MCP Server] ✓ ${msg}`);
-              addLog('success', msg, { elapsed });
-              resolve({ stdout, stderr, logs });
-            }
-          });
-        });
-      });
-
-      conn.on('error', (err) => {
-        clearTimeout(timeoutHandle);
-        reject(err);
-      });
-
-      conn.connect({
-        host: vpsConfig.host,
-        port: vpsConfig.port,
-        username: vpsConfig.user,
-        password: vpsConfig.password,
-        readyTimeout: 10000
-      });
-    });
   }
 
   /**
@@ -5033,6 +4730,185 @@ export default {
     console.log('[MCP Server] ✅ Vite config v3 validated');
   }
 
+  // NATIVEWIND SETUP FOR EXPO PROJECTS
+  private async setupNativeWindForExpo(projectPath: string): Promise<void> {
+    console.log('[MCP Server] 🔍 Setting up NativeWind for Expo project...');
+    
+    try {
+      // 1. Install NativeWind dependencies
+      await this.installNativeWindDependencies(projectPath);
+      
+      // 2. Create tailwind.config.js
+      await this.createNativeWindTailwindConfig(projectPath);
+      
+      // 3. Create postcss.config.js
+      await this.createNativeWindPostCSSConfig(projectPath);
+      
+      // 4. Update babel.config.js
+      await this.updateBabelConfigForNativeWind(projectPath);
+      
+      // 5. Create nativewind-env.d.ts for TypeScript support
+      await this.createNativeWindTypeDefinitions(projectPath);
+      
+      // 6. Update app.json if it exists
+      await this.updateAppJsonForNativeWind(projectPath);
+      
+      console.log('[MCP Server] ✅ NativeWind setup complete');
+    } catch (error) {
+      console.error('[MCP Server] ❌ NativeWind setup failed:', error);
+      throw error;
+    }
+  }
+
+  private async installNativeWindDependencies(projectPath: string): Promise<void> {
+    console.log('[MCP Server] 📦 Installing NativeWind dependencies...');
+    
+    try {
+      const packageJsonPath = path.join(projectPath, 'package.json');
+      const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'));
+      
+      // Add NativeWind dependencies
+      if (!packageJson.dependencies) {
+        packageJson.dependencies = {};
+      }
+      if (!packageJson.devDependencies) {
+        packageJson.devDependencies = {};
+      }
+      
+      // NativeWind v4 (latest)
+      packageJson.dependencies['nativewind'] = '^4.0.1';
+      packageJson.devDependencies['tailwindcss'] = '^3.4.1';
+      packageJson.devDependencies['postcss'] = '^8.4.35';
+      packageJson.devDependencies['autoprefixer'] = '^10.4.17';
+      
+      await fs.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2), 'utf-8');
+      console.log('[MCP Server] ✅ NativeWind dependencies added to package.json');
+    } catch (error) {
+      console.error('[MCP Server] ⚠️ Failed to update package.json:', error);
+      throw error;
+    }
+  }
+
+  private async createNativeWindTailwindConfig(projectPath: string): Promise<void> {
+    const tailwindConfigPath = path.join(projectPath, 'tailwind.config.js');
+    
+    const tailwindConfig = `/** @type {import('tailwindcss').Config} */
+module.exports = {
+  content: [
+    "./App.{js,jsx,ts,tsx}",
+    "./src/**/*.{js,jsx,ts,tsx}",
+    "./app/**/*.{js,jsx,ts,tsx}",
+    "./components/**/*.{js,jsx,ts,tsx}",
+  ],
+  presets: [require("nativewind/preset")],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}`;
+    
+    await fs.writeFile(tailwindConfigPath, tailwindConfig, 'utf-8');
+    console.log('[MCP Server] ✅ Created tailwind.config.js for NativeWind');
+  }
+
+  private async createNativeWindPostCSSConfig(projectPath: string): Promise<void> {
+    const postcssConfigPath = path.join(projectPath, 'postcss.config.js');
+    
+    const postcssConfig = `module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}`;
+    
+    await fs.writeFile(postcssConfigPath, postcssConfig, 'utf-8');
+    console.log('[MCP Server] ✅ Created postcss.config.js for NativeWind');
+  }
+
+  private async updateBabelConfigForNativeWind(projectPath: string): Promise<void> {
+    const babelConfigPath = path.join(projectPath, 'babel.config.js');
+    
+    try {
+      let babelConfig = await fs.readFile(babelConfigPath, 'utf-8');
+      
+      // Check if NativeWind plugin is already present
+      if (babelConfig.includes('nativewind/babel')) {
+        console.log('[MCP Server] ✅ NativeWind plugin already in babel.config.js');
+        return;
+      }
+      
+      // Add NativeWind plugin to plugins array
+      // Handle both array and object formats
+      if (babelConfig.includes('plugins: [')) {
+        // Array format
+        babelConfig = babelConfig.replace(
+          /plugins:\s*\[/,
+          "plugins: [\n      'nativewind/babel',"
+        );
+      } else if (babelConfig.includes('plugins:')) {
+        // Object format - convert to array
+        babelConfig = babelConfig.replace(
+          /plugins:\s*\{[^}]*\}/,
+          "plugins: ['nativewind/babel']"
+        );
+      } else {
+        // No plugins section - add it
+        if (babelConfig.includes('module.exports = {')) {
+          babelConfig = babelConfig.replace(
+            /module\.exports = \{/,
+            "module.exports = {\n  plugins: ['nativewind/babel'],"
+          );
+        }
+      }
+      
+      await fs.writeFile(babelConfigPath, babelConfig, 'utf-8');
+      console.log('[MCP Server] ✅ Updated babel.config.js with NativeWind plugin');
+    } catch (error) {
+      console.warn('[MCP Server] ⚠️ Failed to update babel.config.js:', error);
+      // Create a new babel.config.js if it doesn't exist or is invalid
+      const defaultBabelConfig = `module.exports = function(api) {
+  api.cache(true);
+  return {
+    presets: ['babel-preset-expo'],
+    plugins: ['nativewind/babel'],
+  };
+};`;
+      await fs.writeFile(babelConfigPath, defaultBabelConfig, 'utf-8');
+      console.log('[MCP Server] ✅ Created new babel.config.js with NativeWind plugin');
+    }
+  }
+
+  private async createNativeWindTypeDefinitions(projectPath: string): Promise<void> {
+    const typeDefPath = path.join(projectPath, 'nativewind-env.d.ts');
+    
+    const typeDef = `/// <reference types="nativewind/types" />`;
+    
+    await fs.writeFile(typeDefPath, typeDef, 'utf-8');
+    console.log('[MCP Server] ✅ Created nativewind-env.d.ts for TypeScript support');
+  }
+
+  private async updateAppJsonForNativeWind(projectPath: string): Promise<void> {
+    const appJsonPath = path.join(projectPath, 'app.json');
+    
+    try {
+      const appJson = JSON.parse(await fs.readFile(appJsonPath, 'utf-8'));
+      
+      // Ensure expo configuration exists
+      if (!appJson.expo) {
+        appJson.expo = {};
+      }
+      
+      // Add or update plugins if needed (NativeWind doesn't require specific plugins in app.json)
+      // But we can ensure the configuration is valid
+      
+      await fs.writeFile(appJsonPath, JSON.stringify(appJson, null, 2), 'utf-8');
+      console.log('[MCP Server] ✅ Verified app.json configuration');
+    } catch (error) {
+      // app.json might not exist or be in a different format - that's okay
+      console.log('[MCP Server] ℹ️ app.json not found or couldn\'t be updated (this is okay)');
+    }
+  }
+
   private generateThemeForProject(projectDescription: string): object {
     // Analyze project description to suggest appropriate colors
     const themes = {
@@ -5184,7 +5060,7 @@ export default {
     console.error(`ScopesFlow Cursor MCP Server running on ws://${host}:${port}`);
   }
 
-  async processMessage(message: any) {
+  private async processMessage(message: any) {
     try {
       console.log('[MCP Server] Processing message:', message);
       
@@ -5336,42 +5212,34 @@ export default {
   }
 }
 
-// Only start the server if this file is run directly (not imported as a module)
-// For ES modules, check if we're being imported vs run directly
-// Also check if we're in a Netlify Function environment
-const isNetlifyFunction = process.env.NETLIFY_DEV || process.env.NETLIFY_FUNCTION_TARGET || process.env.AWS_LAMBDA_FUNCTION_NAME;
-const isRunDirectly = process.argv[1]?.includes('server.ts') || process.argv[1]?.includes('server.js');
+// Start the server
+const server = new CursorMCPServer();
 
-if (isRunDirectly && !isNetlifyFunction) {
-  // Start the server
-  const server = new CursorMCPServer();
+// Handle graceful shutdown
+process.on('SIGINT', async () => {
+  console.error('Shutting down MCP server...');
+  await server.stop();
+  process.exit(0);
+});
 
-  // Handle graceful shutdown
-  process.on('SIGINT', async () => {
-    console.error('Shutting down MCP server...');
-    await server.stop();
-    process.exit(0);
-  });
+process.on('SIGTERM', async () => {
+  console.error('Shutting down MCP server...');
+  await server.stop();
+  process.exit(0);
+});
 
-  process.on('SIGTERM', async () => {
-    console.error('Shutting down MCP server...');
-    await server.stop();
-    process.exit(0);
-  });
+// Determine server mode based on command line arguments
+const args = process.argv.slice(2);
+const mode = args.includes('--cursor') ? 'cursor' : 'websocket';
 
-  // Determine server mode based on command line arguments
-  const args = process.argv.slice(2);
-  const mode = args.includes('--cursor') ? 'cursor' : 'websocket';
-
-  if (mode === 'cursor') {
-    // Start stdio server for Cursor integration
-    console.error('Starting MCP server in Cursor mode (stdio)...');
-    server.run().catch(console.error);
-  } else {
-    // Start WebSocket server for ScopesFlow integration
-    console.error('Starting MCP server in WebSocket mode...');
-    server.runWebSocket().catch(console.error);
-  }
+if (mode === 'cursor') {
+  // Start stdio server for Cursor integration
+  console.error('Starting MCP server in Cursor mode (stdio)...');
+  server.run().catch(console.error);
+} else {
+  // Start WebSocket server for ScopesFlow integration
+  console.error('Starting MCP server in WebSocket mode...');
+  server.runWebSocket().catch(console.error);
 }
 
 
