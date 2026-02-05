@@ -95,9 +95,10 @@ export async function runBuildLoop(
     if (error) log(`Failed to update status: ${error.message}`, 'error');
   };
 
-  // log_type must match DB CHECK constraint; override via env if needed (e.g. 'info'/'error')
-  const LOG_TYPE_INFO = process.env.MCP_BUILD_LOG_TYPE_INFO ?? 'stdout';
-  const LOG_TYPE_ERROR = process.env.MCP_BUILD_LOG_TYPE_ERROR ?? 'stderr';
+  // log_type must match DB CHECK constraint: 'build_log' or 'mcp_log'
+  // Override via env if needed (e.g. MCP_BUILD_LOG_TYPE_ERROR='mcp_log')
+  const LOG_TYPE_INFO = process.env.MCP_BUILD_LOG_TYPE_INFO ?? 'build_log';
+  const LOG_TYPE_ERROR = process.env.MCP_BUILD_LOG_TYPE_ERROR ?? 'build_log';
   const levelToLogType = (level: string): string =>
     level === 'error' ? LOG_TYPE_ERROR : LOG_TYPE_INFO;
 
