@@ -30,6 +30,11 @@ OPENAI_API_KEY=sk-your-actual-openai-api-key-here
 # MCP Server Configuration (Optional - defaults shown)
 MCP_SERVER_PORT=3001
 MCP_SERVER_HOST=localhost
+
+# Build API (optional - for VPS + Edge Function trigger)
+# On VPS set MCP_SERVER_HOST=0.0.0.0 so nginx can reach the server.
+# Set MCP_BUILD_API_KEY to match Supabase Edge Function secret for POST /api/start-build.
+# MCP_BUILD_API_KEY=your-long-random-secret
 ```
 
 ⚠️ **Important:** Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key from https://platform.openai.com/api-keys

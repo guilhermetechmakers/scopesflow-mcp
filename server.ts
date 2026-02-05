@@ -4,6 +4,7 @@ import { exec, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as http from 'http';
 import * as dotenv from 'dotenv';
 import { WebSocketServer } from 'ws';
 
@@ -69,6 +70,7 @@ interface ProjectGitConfig {
 class CursorMCPServer {
   private server: Server;
   private wss: WebSocketServer | null = null;
+  private httpServer: http.Server | null = null;
   private toolHandlers: Map<string, (args: any) => Promise<any>> = new Map();
   private cursorAgentAvailable: boolean = false;
   private gitMutex: Promise<void> = Promise.resolve();
@@ -5011,53 +5013,127 @@ module.exports = {
     return selectedTheme;
   }
 
-  // WebSocket server implementation
+  /**
+   * Build runner stub: called by POST /api/start-build after API key check.
+   * Payload: { buildId, supabaseUrl, accessToken, anonKey } from Edge Function.
+   * Implement the actual build loop (Supabase updates, runner process) as needed.
+   */
+  private async runBuild(_payload: {
+    buildId: string;
+    supabaseUrl?: string;
+    accessToken?: string;
+    anonKey?: string;
+  }): Promise<void> {
+    console.error('[MCP Server] Build started (runner stub)', { buildId: _payload.buildId });
+    // TODO: implement build loop (update automated_builds, run steps, write build_logs)
+  }
+
+  /** CORS headers for /api/start-build (browser or Edge Function). */
+  private getBuildApiCorsHeaders(): Record<string, string> {
+    return {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Content-Type': 'application/json',
+    };
+  }
+
+  // WebSocket server implementation (HTTP server with upgrade + POST /api/start-build)
   async runWebSocket() {
     const port = parseInt(process.env.MCP_SERVER_PORT || '3001');
     const host = process.env.MCP_SERVER_HOST || 'localhost';
-    
-    this.wss = new WebSocketServer({ 
-      port,
-      host,
-      perMessageDeflate: false
-    });
-    
-    console.error(`Starting ScopesFlow Cursor MCP Server on ws://${host}:${port}`);
-    
+    const apiKey = process.env.MCP_BUILD_API_KEY?.trim();
+
+    this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+
     this.wss.on('connection', (ws) => {
       console.error('MCP client connected');
-      
       ws.on('message', async (data) => {
         try {
           const message = JSON.parse(data.toString());
           console.error('Received message:', message.type || message.method);
           console.error('Message details:', JSON.stringify(message, null, 2));
-          
           const response = await this.processMessage(message);
           ws.send(JSON.stringify(response));
         } catch (error) {
           console.error('Error processing message:', error);
           ws.send(JSON.stringify({
             error: error instanceof Error ? error.message : 'Unknown error',
-            type: 'error'
+            type: 'error',
           }));
         }
       });
-      
-      ws.on('close', () => {
-        console.error('MCP client disconnected');
-      });
-      
-      ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
+      ws.on('close', () => console.error('MCP client disconnected'));
+      ws.on('error', (error) => console.error('WebSocket error:', error));
+    });
+    this.wss.on('error', (error) => console.error('WebSocket server error:', error));
+
+    this.httpServer = http.createServer((req, res) => {
+      // Let upgrade handler take over for WebSocket
+      if (req.headers.upgrade === 'websocket') {
+        return;
+      }
+      const url = req.url || '';
+      const isStartBuild = url === '/api/start-build' || url === '/api/start-build/';
+      const cors = this.getBuildApiCorsHeaders();
+
+      if (isStartBuild && req.method === 'OPTIONS') {
+        res.writeHead(200, cors);
+        res.end();
+        return;
+      }
+
+      if (isStartBuild && req.method === 'POST') {
+        // Optional: API key check (plan §3.1)
+        if (apiKey) {
+          const headerKey = req.headers['x-api-key'];
+          if (headerKey !== apiKey) {
+            res.writeHead(401, cors);
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          try {
+            const payload = JSON.parse(body || '{}') as { buildId: string; supabaseUrl?: string; accessToken?: string; anonKey?: string };
+            if (!payload.buildId) {
+              res.writeHead(400, cors);
+              res.end(JSON.stringify({ error: 'Missing buildId' }));
+              return;
+            }
+            this.runBuild(payload)
+              .then(() => {
+                res.writeHead(200, cors);
+                res.end(JSON.stringify({ ok: true, buildId: payload.buildId }));
+              })
+              .catch((err) => {
+                console.error('[MCP Server] runBuild error:', err);
+                res.writeHead(500, cors);
+                res.end(JSON.stringify({ error: 'Build start failed' }));
+              });
+          } catch (e) {
+            res.writeHead(400, cors);
+            res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+          }
+        });
+        return;
+      }
+
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
+    });
+
+    this.httpServer.on('upgrade', (req, socket, head) => {
+      this.wss!.handleUpgrade(req, socket, head, (ws) => {
+        this.wss!.emit('connection', ws, req);
       });
     });
-    
-    this.wss.on('error', (error) => {
-      console.error('WebSocket server error:', error);
+
+    this.httpServer.listen(port, host, () => {
+      console.error(`ScopesFlow Cursor MCP Server running on http://${host}:${port} (ws upgrade + POST /api/start-build)`);
     });
-    
-    console.error(`ScopesFlow Cursor MCP Server running on ws://${host}:${port}`);
   }
 
   private async processMessage(message: any) {
@@ -5205,8 +5281,14 @@ module.exports = {
   }
 
   async stop() {
+    if (this.httpServer) {
+      this.httpServer.close();
+      this.httpServer = null;
+      console.error('HTTP server stopped');
+    }
     if (this.wss) {
       this.wss.close();
+      this.wss = null;
       console.error('WebSocket server stopped');
     }
   }
