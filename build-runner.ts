@@ -103,13 +103,21 @@ export async function runBuildLoop(
     level === 'error' ? LOG_TYPE_ERROR : LOG_TYPE_INFO;
 
   const appendLog = async (message: string, level: string = 'info') => {
+    const logTypeValue = levelToLogType(level);
+    // Debug: log what we're trying to insert
+    if (process.env.DEBUG_BUILD_LOGS === 'true') {
+      console.error(`[BuildRunner] appendLog: level="${level}", log_type="${logTypeValue}", LOG_TYPE_INFO="${LOG_TYPE_INFO}", LOG_TYPE_ERROR="${LOG_TYPE_ERROR}"`);
+    }
     const { error } = await supabase.from('build_logs').insert({
       build_id: buildId,
-      log_type: levelToLogType(level),
+      log_type: logTypeValue,
       message,
       created_at: new Date().toISOString(),
     });
-    if (error) log(`Failed to append log: ${error.message}`, 'error');
+    if (error) {
+      log(`Failed to append log: ${error.message}`, 'error');
+      console.error(`[BuildRunner] Failed insert details: log_type="${logTypeValue}", level="${level}", env MCP_BUILD_LOG_TYPE_INFO="${process.env.MCP_BUILD_LOG_TYPE_INFO}", env MCP_BUILD_LOG_TYPE_ERROR="${process.env.MCP_BUILD_LOG_TYPE_ERROR}"`);
+    }
   };
 
   const { data: buildRow, error: fetchError } = await supabase
@@ -155,6 +163,9 @@ export async function runBuildLoop(
   if (configObj.supabaseUrl && !mergedCursorConfig.supabaseUrl) mergedCursorConfig.supabaseUrl = configObj.supabaseUrl;
   if (configObj.designReference && !mergedCursorConfig.designReference) mergedCursorConfig.designReference = configObj.designReference;
   if (configObj.designPatternId && !mergedCursorConfig.designPatternId) mergedCursorConfig.designPatternId = configObj.designPatternId;
+  
+  // Debug: log merged config
+  console.error('[BuildRunner] Merged cursorConfig:', JSON.stringify(mergedCursorConfig, null, 2));
 
   let prompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
   if (prompts.length === 0) {
