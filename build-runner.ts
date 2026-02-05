@@ -95,10 +95,14 @@ export async function runBuildLoop(
     if (error) log(`Failed to update status: ${error.message}`, 'error');
   };
 
+  // Map level to log_type: build_logs often has CHECK (log_type IN ('stdout','stderr'))
+  const levelToLogType = (level: string): string =>
+    level === 'error' ? 'stderr' : 'stdout';
+
   const appendLog = async (message: string, level: string = 'info') => {
     const { error } = await supabase.from('build_logs').insert({
       build_id: buildId,
-      log_type: level,
+      log_type: levelToLogType(level),
       message,
       created_at: new Date().toISOString(),
     });
