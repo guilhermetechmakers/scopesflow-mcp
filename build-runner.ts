@@ -1,5 +1,5 @@
 import * as path from 'path';
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 /** Config passed to create-project (matches server CursorProjectConfig shape). */
 export interface BuildCursorConfig {
@@ -53,6 +53,15 @@ export interface RunBuildLoopOptions {
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   /** Optional overrides from start-build payload (not persisted) */
   configOverrides?: Partial<BuildCursorConfig>;
+}
+
+export interface RunBuildFromPayloadOptions {
+  buildId: string;
+  supabaseUrl: string;
+  accessToken: string;
+  anonKey: string;
+  createProjectFn: CreateProjectFn;
+  executePromptFn: ExecutePromptFn;
 }
 
 /** Row from automated_builds (expected columns). */
@@ -219,23 +228,6 @@ export async function runBuildLoop(
   let prompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
   let promptSource: string | undefined = prompts.length > 0 ? 'configuration.prompts' : undefined;
   if (prompts.length === 0) {
-    const { data: promptRows, error: promptError } = await supabase
-      .from('automated_build_prompts')
-      .select('prompt, content, order')
-      .eq('build_id', buildId)
-      .order('order', { ascending: true });
-    if (promptError) {
-      log(`Failed to query automated_build_prompts: ${promptError.message}`, 'error');
-      await appendLog(`Failed to query automated_build_prompts: ${promptError.message}`, 'error');
-    }
-    if (Array.isArray(promptRows)) {
-      prompts = promptRows
-        .map((r: { prompt?: string; content?: string }) => (r.prompt ?? r.content ?? ''))
-        .filter(Boolean);
-      if (prompts.length > 0) promptSource = 'automated_build_prompts';
-    }
-  }
-  if (prompts.length === 0) {
     const projectId =
       (configuration as { projectId?: string; project_id?: string }).projectId ??
       (configuration as { projectId?: string; project_id?: string }).project_id;
@@ -259,7 +251,7 @@ export async function runBuildLoop(
     }
   }
   if (prompts.length === 0) {
-    const message = `No prompts found for build ${buildId}. Checked configuration.prompts, automated_build_prompts, and flowchart_items.`;
+    const message = `No prompts found for build ${buildId}. Checked configuration.prompts and flowchart_items.`;
     log(message, 'error');
     await appendLog(message, 'error');
     await updateStatus('failed');
@@ -364,4 +356,72 @@ export async function runBuildLoop(
     await appendLog(`Build failed: ${message}`, 'error');
     await updateStatus('failed');
   }
+}
+
+/**
+ * End-to-end build entrypoint: validate user, load build row + GitHub auth,
+ * then run the build loop with config overrides.
+ */
+export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): Promise<void> {
+  const { buildId, supabaseUrl, accessToken, anonKey, createProjectFn, executePromptFn } = options;
+
+  const supabase: SupabaseClient = createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+  });
+
+  const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
+  if (userError || !user) {
+    console.error('[BuildRunner] Build start: invalid user', userError?.message ?? 'no user');
+    return;
+  }
+
+  const { data: buildRow, error: buildError } = await supabase
+    .from('automated_builds')
+    .select('*')
+    .eq('id', buildId)
+    .single();
+
+  if (buildError || !buildRow) {
+    console.error('[BuildRunner] Build start: build not found', buildId, buildError?.message);
+    return;
+  }
+
+  const configuration = (buildRow as AutomatedBuildRow).configuration;
+  const cursorConfig = configuration && typeof configuration === 'object' && 'cursorConfig' in configuration
+    ? (configuration as { cursorConfig?: unknown }).cursorConfig
+    : undefined;
+
+  if (!configuration || !cursorConfig) {
+    console.error('[BuildRunner] Build start: configuration or cursorConfig missing', buildId);
+    return;
+  }
+
+  let githubAuth: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string } | undefined;
+  try {
+    const { data: ghRow } = await supabase
+      .from('github_auth')
+      .select('access_token, login, email')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (ghRow && typeof ghRow === 'object') {
+      const row = ghRow as { access_token?: string; login?: string; email?: string };
+      githubAuth = {
+        gitHubToken: row.access_token,
+        gitUserName: row.login,
+        gitUserEmail: row.email,
+      };
+    }
+  } catch {
+    // optional
+  }
+
+  await runBuildLoop(supabase, buildId, {
+    createProjectFn,
+    executePromptFn,
+    githubAuth,
+    configOverrides: {
+      supabaseUrl,
+      supabaseAnonKey: anonKey,
+    },
+  });
 }

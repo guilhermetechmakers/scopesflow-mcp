@@ -8,7 +8,7 @@ import * as http from 'http';
 import * as dotenv from 'dotenv';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { WebSocketServer } from 'ws';
-import { runBuildLoop } from './build-runner.js';
+import { runBuildFromPayload, runBuildLoop } from './build-runner.js';
 
 // Load environment variables (optional now, not required for Cursor CLI)
 dotenv.config();
@@ -5049,56 +5049,6 @@ module.exports = {
     accessToken: string,
     anonKey: string
   ): Promise<void> {
-    const supabase: SupabaseClient = createClient(supabaseUrl, anonKey, {
-      global: { headers: { Authorization: `Bearer ${accessToken}` } },
-    });
-
-    const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
-    if (userError || !user) {
-      console.error('[MCP Server] Build start: invalid user', userError?.message ?? 'no user');
-      return;
-    }
-
-    const { data: buildRow, error: buildError } = await supabase
-      .from('automated_builds')
-      .select('*')
-      .eq('id', buildId)
-      .single();
-
-    if (buildError || !buildRow) {
-      console.error('[MCP Server] Build start: build not found', buildId, buildError?.message);
-      return;
-    }
-
-    const configuration = (buildRow as { configuration?: unknown }).configuration;
-    const cursorConfig = configuration && typeof configuration === 'object' && 'cursorConfig' in configuration
-      ? (configuration as { cursorConfig?: unknown }).cursorConfig
-      : undefined;
-
-    if (!configuration || !cursorConfig) {
-      console.error('[MCP Server] Build start: configuration or cursorConfig missing', buildId);
-      return;
-    }
-
-    let githubAuth: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string } | undefined;
-    try {
-      const { data: ghRow } = await supabase
-        .from('github_auth')
-        .select('access_token, login, email')
-        .eq('user_id', user.id)
-        .maybeSingle();
-      if (ghRow && typeof ghRow === 'object') {
-        const row = ghRow as { access_token?: string; login?: string; email?: string };
-        githubAuth = {
-          gitHubToken: row.access_token,
-          gitUserName: row.login,
-          gitUserEmail: row.email,
-        };
-      }
-    } catch {
-      // optional
-    }
-
     const createProjectFn = (config: unknown) => {
       const c = config as Record<string, unknown>;
       // Pass through all fields from config, ensure name/path exist for validateCreateProjectArgs
@@ -5114,16 +5064,15 @@ module.exports = {
       this.executePrompt(this.validateExecutePromptArgs(args as Record<string, unknown>));
 
     setImmediate(() => {
-      runBuildLoop(supabase, buildId, {
+      runBuildFromPayload({
+        buildId,
+        supabaseUrl,
+        accessToken,
+        anonKey,
         createProjectFn,
         executePromptFn,
-        githubAuth,
-        configOverrides: {
-          supabaseUrl,
-          supabaseAnonKey: anonKey,
-        },
       }).catch((err) => {
-        console.error('[MCP Server] runBuildLoop error:', err);
+        console.error('[MCP Server] runBuildFromPayload error:', err);
       });
     });
   }
