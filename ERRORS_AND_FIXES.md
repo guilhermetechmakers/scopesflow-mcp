@@ -133,12 +133,10 @@ const flushLogs = async () => {
 ```
 
 ### Recommended Implementation
-Combine Solution 1 (token refresh) with Solution 3 (graceful degradation) for the most robust approach:
+Solution 2 (Service Role Key) is now the primary fix. Token refresh (Solution 1) does not work with header-based auth because there is no stored refresh token. When `supabaseServiceRoleKey` is provided (via start-build payload or `MCP_SUPABASE_SERVICE_ROLE_KEY` env), the build loop uses a service role client for all DB operations—bypassing RLS and avoiding JWT expiry.
 
-1. Check token expiration before each database operation
-2. Attempt to refresh if needed
-3. Continue build execution even if database operations fail
-4. Log errors but don't block the build
+### Current Status
+✅ **FIXED** - `runBuildFromPayload` accepts optional `supabaseServiceRoleKey` (payload or `MCP_SUPABASE_SERVICE_ROLE_KEY` env). When set, a service role client is used for the build loop; otherwise falls back to user-token client with graceful degradation.
 
 ---
 
@@ -193,25 +191,43 @@ Using `spawn` or `exec` with `shell: true` and passing arguments directly can be
 - May break in future Node.js versions
 
 ### Solution
-Use `shell: false` and pass arguments as an array, or properly escape arguments:
+Use `shell: false` and pass arguments as an array, or use a single command string with empty args when shell is required:
 
 ```typescript
 // Instead of:
 spawn('npm', ['run', 'build'], { shell: true, cwd: projectPath });
+spawn(command, { cwd, shell: true });  // options passed as 2nd arg - wrong
 
 // Use:
-spawn('npm', ['run', 'build'], { shell: false, cwd: projectPath });
-
-// Or if shell is required, use execAsync with proper escaping:
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const execAsync = promisify(exec);
-
-await execAsync(`npm run build`, { cwd: projectPath });
+spawn('npm run dev', [], { shell: true, cwd: projectPath });  // single string, empty args
+spawn(command, [], { cwd, shell: true });  // empty args array as 2nd param
 ```
+
+### Current Status
+✅ **FIXED** - Dev server spawn and cursor-agent spawn now use `spawn(cmd, [], options)` with empty args array.
 
 ### Priority
 **Low** - Warning only, doesn't affect functionality but should be addressed for security.
+
+---
+
+## Error 4: GitHub Repo 404 / Invalid Repository Name
+
+### Error Message
+```
+GET /repos/guilhermetechmakers/FlowBoard%20%E2%80%94%20AI-Assisted%20Visual%20Idea%20Mapping - 404
+```
+
+### Description
+When project names contain spaces, em dashes (—), or other special characters, GitHub rejects the repository name. The 404 from `repos.get` is expected when the repo does not exist, but `createForAuthenticatedUser` with an invalid name returns 422.
+
+### Root Cause
+- GitHub repo names must use alphanumerics, hyphens, underscores, and periods only
+- Project names like "FlowBoard — AI-Assisted Visual Idea Mapping" were used as-is
+- `path.basename(projectPath)` preserves spaces and em dashes
+
+### Current Status
+✅ **FIXED** - Added `sanitizeRepoNameForGitHub()` that replaces spaces with hyphens, normalizes dashes, and strips invalid characters. Used when auto-generating repo URLs and in `createGitHubRepository`.
 
 ---
 
@@ -221,26 +237,23 @@ await execAsync(`npm run build`, { cwd: projectPath });
 |-------|----------|--------|----------|
 | JWT Expired | High | ✅ Fixed | P0 |
 | GitHub Token Missing | Medium | ✅ Fixed | P1 |
-| Deprecation Warning | Low | Needs Fix | P2 |
+| Deprecation Warning | Low | ✅ Fixed | P2 |
+| GitHub Repo Invalid Name | Medium | ✅ Fixed | P1 |
 
 ### Implementation Status
 
-#### ✅ JWT Expiration - IMPLEMENTED
-- **Token Refresh**: Added `refreshTokenIfNeeded()` function that checks token expiration and refreshes if needed (within 1 minute of expiry)
-- **Graceful Degradation**: All database operations (`updateStatus`, `appendLog`, `flowchart_items` query) now:
-  - Attempt token refresh before operations
-  - Wrap operations in try-catch blocks
-  - Continue execution even if database operations fail
-  - Log errors without blocking the build
+#### ✅ JWT Expiration - IMPLEMENTED (Service Role)
+- **Service Role Key**: When `supabaseServiceRoleKey` is provided (start-build payload or `MCP_SUPABASE_SERVICE_ROLE_KEY` env), `runBuildFromPayload` creates a service role client for the build loop—no JWT expiry.
+- **Graceful Degradation**: When service role key is not available, falls back to user-token client; existing `refreshTokenIfNeeded` and try-catch remain for non-blocking behavior.
 
-**Implementation Details:**
-- Token refresh checks session expiration before each database operation
-- If token expires in < 1 minute, automatically refreshes using `supabase.auth.refreshSession()`
-- All database operations are non-blocking - build continues even if DB writes fail
-- Errors are logged but don't stop the build process
+#### ✅ GitHub Repo Sanitization - IMPLEMENTED
+- `sanitizeRepoNameForGitHub()` replaces spaces, em/en dashes with hyphens, strips invalid chars.
+- Used in auto-generated repo URLs and inside `createGitHubRepository`.
+
+#### ✅ Deprecation Warning - IMPLEMENTED
+- Dev server: `spawn('npm run dev', [], { ... })`
+- Cursor-agent: `spawn(command, [], { ... })`
 
 ### Next Steps
-1. ✅ **Completed**: Implement token refresh logic (Solution 1) for JWT expiration
-2. ✅ **Completed**: Add graceful degradation for database operations
-3. **Future Enhancement**: Consider using service role key for build operations if token refresh proves insufficient
-4. **Low Priority**: Fix deprecation warning for shell execution security
+1. Set `MCP_SUPABASE_SERVICE_ROLE_KEY` in PM2/ecosystem config for long-running builds (recommended).
+2. Optionally pass `supabaseServiceRoleKey` in the start-build payload from the Edge Function.

@@ -43,6 +43,8 @@ export interface BuildExecutePromptArgs {
   isRetry?: boolean;
   supabaseClient?: SupabaseClient;
   userId?: string;
+  /** When set, the MCP server can append to build_logs for this build in realtime. */
+  buildId?: string;
 }
 
 export type CreateProjectFn = (config: BuildCursorConfig) => Promise<unknown>;
@@ -62,6 +64,8 @@ export interface RunBuildFromPayloadOptions {
   supabaseUrl: string;
   accessToken: string;
   anonKey: string;
+  /** Optional service role key for build DB operations (bypasses RLS, avoids JWT expiry during long builds) */
+  supabaseServiceRoleKey?: string;
   createProjectFn: CreateProjectFn;
   executePromptFn: ExecutePromptFn;
 }
@@ -262,6 +266,8 @@ export async function runBuildLoop(
     return;
   }
 
+  await appendLog('Build loaded, validating configuration');
+
   // Debug: log what we received from DB (redacted)
   console.error('[BuildRunner] Full configuration from DB:', JSON.stringify(sanitizeRecord(configuration), null, 2));
   console.error('[BuildRunner] cursorConfig from DB:', JSON.stringify(sanitizeRecord(cursorConfig), null, 2));
@@ -370,6 +376,8 @@ export async function runBuildLoop(
     return;
   }
 
+  await appendLog('Configuration valid, starting project creation');
+
   const rawSupabaseUrl = (mergedCursorConfig as { supabaseUrl?: unknown }).supabaseUrl;
   const rawSupabaseAnonKey = (mergedCursorConfig as { supabaseAnonKey?: unknown }).supabaseAnonKey;
   if ((hasString(rawSupabaseUrl) && !hasString(rawSupabaseAnonKey)) || (!hasString(rawSupabaseUrl) && hasString(rawSupabaseAnonKey))) {
@@ -413,10 +421,13 @@ export async function runBuildLoop(
     const totalSteps = prompts.length || 1;
     let done = 0;
 
+    await appendLog(`Starting prompt execution (${totalSteps} prompt${totalSteps === 1 ? '' : 's'})`);
+
     for (let i = 0; i < prompts.length; i++) {
       const prompt = prompts[i];
       const stepNum = i + 1;
-      await appendLog(`Running prompt ${stepNum}/${totalSteps}`);
+      const preview = prompt.length > 60 ? `${prompt.substring(0, 60).replace(/\n/g, ' ')}...` : prompt.replace(/\n/g, ' ');
+      await appendLog(`Running prompt ${stepNum}/${totalSteps}: ${preview}`);
       const executeArgs: BuildExecutePromptArgs = {
         prompt,
         projectPath,
@@ -425,6 +436,7 @@ export async function runBuildLoop(
         isRetry: false,
         supabaseClient: supabase,
         userId: row.user_id,
+        buildId,
       };
       if (githubAuth) {
         if (githubAuth.gitHubToken) {
@@ -438,6 +450,7 @@ export async function runBuildLoop(
       }
       await executePromptFn(executeArgs);
       done++;
+      await appendLog(`Prompt ${stepNum}/${totalSteps} completed`);
       const progress = Math.round((done / totalSteps) * 100);
       await updateStatus('running', progress);
     }
@@ -457,19 +470,19 @@ export async function runBuildLoop(
  * then run the build loop with config overrides.
  */
 export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): Promise<void> {
-  const { buildId, supabaseUrl, accessToken, anonKey, createProjectFn, executePromptFn } = options;
+  const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, createProjectFn, executePromptFn } = options;
 
-  const supabase: SupabaseClient = createClient(supabaseUrl, anonKey, {
+  const supabaseUser: SupabaseClient = createClient(supabaseUrl, anonKey, {
     global: { headers: { Authorization: `Bearer ${accessToken}` } },
   });
 
-  const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
+  const { data: { user }, error: userError } = await supabaseUser.auth.getUser(accessToken);
   if (userError || !user) {
     console.error('[BuildRunner] Build start: invalid user', userError?.message ?? 'no user');
     return;
   }
 
-  const { data: buildRow, error: buildError } = await supabase
+  const { data: buildRow, error: buildError } = await supabaseUser
     .from('automated_builds')
     .select('*')
     .eq('id', buildId)
@@ -493,7 +506,7 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
   let githubAuth: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string } | undefined;
   try {
     console.log(`[BuildRunner] 🔍 Fetching GitHub auth for user_id: ${user.id}`);
-    const { data: ghRow, error: ghError } = await supabase
+    const { data: ghRow, error: ghError } = await supabaseUser
       .from('github_auth')
       .select('access_token')
       .eq('user_id', user.id)
@@ -521,7 +534,18 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
     console.warn(`[BuildRunner] ⚠️ Exception fetching GitHub auth:`, error instanceof Error ? error.message : 'Unknown error');
   }
 
-  await runBuildLoop(supabase, buildId, {
+  // Use service role client for build loop (avoids JWT expiry during long builds).
+  // Falls back to user-token client when service role key is not available.
+  const supabaseForBuild: SupabaseClient = supabaseServiceRoleKey
+    ? createClient(supabaseUrl, supabaseServiceRoleKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      })
+    : supabaseUser;
+  if (supabaseServiceRoleKey) {
+    console.log('[BuildRunner] ✅ Using service role key for build DB operations (JWT expiry safe)');
+  }
+
+  await runBuildLoop(supabaseForBuild, buildId, {
     createProjectFn,
     executePromptFn,
     githubAuth,

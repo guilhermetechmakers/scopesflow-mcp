@@ -55,6 +55,7 @@ interface ExecutePromptArgs {
   isRetry?: boolean;         // NEW: Flag to indicate if this is a retry attempt
   supabaseClient?: SupabaseClient; // NEW: Optional Supabase client for fetching GitHub auth
   userId?: string;           // NEW: Optional user ID for fetching GitHub auth
+  buildId?: string;          // NEW: When set, server appends to build_logs for realtime following
 }
 interface ProjectPathArgs {
   projectPath: string;
@@ -1111,7 +1112,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
   }
 
   private validateExecutePromptArgs(args: Record<string, unknown>): ExecutePromptArgs {
-    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId } = args;
+    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId } = args;
     
     if (typeof prompt !== 'string') throw new Error('Prompt must be a string');
     if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
@@ -1130,7 +1131,8 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       retryCount: typeof retryCount === 'number' ? retryCount : undefined,
       isRetry: typeof isRetry === 'boolean' ? isRetry : false,
       supabaseClient: supabaseClient instanceof Object && 'from' in supabaseClient ? supabaseClient as SupabaseClient : undefined,
-      userId: typeof userId === 'string' ? userId : undefined
+      userId: typeof userId === 'string' ? userId : undefined,
+      buildId: typeof buildId === 'string' ? buildId : undefined
     };
   }
 
@@ -1304,16 +1306,21 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       // Auto-generate repository name from project path if not provided
       if (!config.gitRepository && config.gitHubToken) {
         const pathBasedName = path.basename(config.projectPath);
-        console.log('[MCP Server] 📝 Auto-generating repository name from path:', pathBasedName);
+        const sanitizedName = this.sanitizeRepoNameForGitHub(pathBasedName);
+        console.log('[MCP Server] 📝 Auto-generating repository name from path:', pathBasedName, '->', sanitizedName);
         
         // This will be used by the GitHub creation logic below
-        config.gitRepository = `https://github.com/auto-generated/${pathBasedName}.git`;
+        config.gitRepository = `https://github.com/auto-generated/${sanitizedName}.git`;
       }
 
       // Create GitHub repository BEFORE git init (if token and repo URL provided)
       if (config.gitRepository && config.gitHubToken) {
         try {
-          const repoName = this.extractRepoName(config.gitRepository);
+          const rawRepoName = this.extractRepoName(config.gitRepository);
+          const repoName = this.sanitizeRepoNameForGitHub(rawRepoName);
+          if (rawRepoName !== repoName) {
+            console.log('[MCP Server] 📝 Sanitized repo name for GitHub:', rawRepoName, '->', repoName);
+          }
           console.log('[MCP Server] 🚀 Creating GitHub repository...');
           
           const repoResult = await this.createGitHubRepository(
@@ -1605,8 +1612,27 @@ When implementing this project:
   // CURSOR CLI INTEGRATION - Let Cursor handle the AI code generation!
   private async executePrompt(args: ExecutePromptArgs) {
     const startTime = Date.now();
-    
+
+    // When running as part of an automated build, append to build_logs for realtime following
+    const appendBuildLog = async (message: string, level: 'info' | 'error' = 'info') => {
+      if (!args.buildId || !args.supabaseClient) return;
+      try {
+        const logType = process.env.MCP_BUILD_LOG_TYPE_ERROR && level === 'error'
+          ? process.env.MCP_BUILD_LOG_TYPE_ERROR
+          : (process.env.MCP_BUILD_LOG_TYPE_INFO ?? 'build_log');
+        await args.supabaseClient.from('build_logs').insert({
+          build_id: args.buildId,
+          log_type: logType,
+          message: message.length > 2000 ? message.substring(0, 1997) + '...' : message,
+          created_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.warn('[MCP Server] appendBuildLog failed (non-blocking):', err instanceof Error ? err.message : err);
+      }
+    };
+
     try {
+      await appendBuildLog('Executing prompt via Cursor CLI');
       console.log(`[MCP Server] ========================================`);
       console.log(`[MCP Server] Executing prompt via Cursor CLI`);
       console.log(`[MCP Server] Project: ${args.projectPath}`);
@@ -1619,8 +1645,10 @@ When implementing this project:
       // Verify project directory exists
       const projectExists = await fs.access(args.projectPath).then(() => true).catch(() => false);
       if (!projectExists) {
+        await appendBuildLog(`Project directory does not exist: ${args.projectPath}`, 'error');
         throw new Error(`Project directory does not exist: ${args.projectPath}`);
       }
+      await appendBuildLog('Project directory verified');
 
       // Load existing git configuration and merge with provided parameters
       console.log('[MCP Server] 🔍 Loading git configuration...');
@@ -1675,9 +1703,12 @@ When implementing this project:
 
       // Check if Cursor Agent is available
       if (!this.cursorAgentAvailable) {
+        await appendBuildLog('Cursor Agent not available, using fallback task file method');
         console.warn('[MCP Server] Cursor Agent not available, using fallback task file method');
         return await this.executePromptFallback(args, startTime);
       }
+
+      await appendBuildLog('Git config loaded');
 
       // Execute prompt using Cursor Agent CLI
       // The cursor-agent command will:
@@ -2140,6 +2171,7 @@ Analyze the existing project structure and implement the task following the patt
         command = `cat .cursor-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model auto`;
       }
       
+      await appendBuildLog('Starting Cursor Agent...');
       console.log(`[MCP Server] Executing cursor-agent in: ${actualProjectPath}`);
       console.log(`[MCP Server] Original prompt length: ${args.prompt.length} characters`);
       console.log(`[MCP Server] Directive prompt length: ${directivePrompt.length} characters`);
@@ -2147,12 +2179,30 @@ Analyze the existing project structure and implement the task following the patt
       let stdout = '';
       let stderr = '';
       let cursorAgentLogs: Array<{ timestamp: string; type: string; message: string; data?: any }> = [];
-      
+      const onBuildLog = (args.buildId && args.supabaseClient)
+        ? async (msg: string, level: 'info' | 'error' = 'info') => {
+            try {
+              const logType = level === 'error' && process.env.MCP_BUILD_LOG_TYPE_ERROR
+                ? process.env.MCP_BUILD_LOG_TYPE_ERROR
+                : (process.env.MCP_BUILD_LOG_TYPE_INFO ?? 'build_log');
+              await args.supabaseClient!.from('build_logs').insert({
+                build_id: args.buildId!,
+                log_type: logType,
+                message: msg.length > 500 ? msg.substring(0, 497) + '...' : msg,
+                created_at: new Date().toISOString(),
+              });
+            } catch (e) {
+              // ignore
+            }
+          }
+        : undefined;
+
       try {
         const result = await this.executeCursorAgentStreaming(
           command,
           isWindows ? undefined : actualProjectPath,
-          args.timeout || 300000 // 5 minute default
+          args.timeout || 300000, // 5 minute default
+          onBuildLog
         );
         stdout = result.stdout;
         stderr = result.stderr;
@@ -2181,6 +2231,7 @@ Analyze the existing project structure and implement the task following the patt
         // Ignore cleanup errors
       }
 
+      await appendBuildLog('Cursor Agent execution completed');
       console.log(`[MCP Server] ✓ Cursor Agent execution completed`);
       console.log(`[MCP Server] Output length: ${stdout.length} characters`);
       
@@ -2189,12 +2240,14 @@ Analyze the existing project structure and implement the task following the patt
       }
 
       // Wait for file system changes to stabilize after cursor-agent execution
+      await appendBuildLog('Waiting for file system to stabilize...');
       console.log(`[MCP Server] ⏳ Waiting for file system changes to stabilize...`);
       await this.waitForFileSystemStability(actualProjectPath, 30000); // 30 second max wait
       console.log(`[MCP Server] ✅ File system changes stabilized`);
 
       // Get the files that were changed
       const filesChanged = await this.getChangedFiles(actualProjectPath);
+      await appendBuildLog(`Files changed: ${filesChanged.length}`);
       
       console.log(`[MCP Server] ========================================`);
       console.log(`[MCP Server] 📊 CURSOR AGENT RESULTS`);
@@ -2219,6 +2272,7 @@ Analyze the existing project structure and implement the task following the patt
       // Validate Tailwind v3 compliance after AI code generation
       try {
         await this.validateAndFixTailwindV3(actualProjectPath);
+        await appendBuildLog('Tailwind validation completed');
         console.log(`[MCP Server] ✅ Post-generation Tailwind v3 validation completed`);
       } catch (validationError) {
         console.warn(`[MCP Server] ⚠️ Post-generation Tailwind v3 validation failed:`, validationError);
@@ -2226,6 +2280,7 @@ Analyze the existing project structure and implement the task following the patt
       }
       
       // Validate build and dev server, auto-fix errors if found
+      await appendBuildLog('Validating build and dev server...');
       console.log('[MCP Server] ========================================');
       console.log('[MCP Server] 🔍 VALIDATING BUILD AND DEV SERVER');
       console.log('[MCP Server] ========================================');
@@ -2236,6 +2291,7 @@ Analyze the existing project structure and implement the task following the patt
         const validationResult = await this.validateBuildAndDev(actualProjectPath);
         
         if (!validationResult.success) {
+          await appendBuildLog(`Build validation failed: ${validationResult.summary}`, 'error');
           console.log('[MCP Server] ⚠️ Build validation failed, initiating auto-fix...');
           console.log(`[MCP Server] ${validationResult.summary}`);
           console.log(`[MCP Server] Error count: ${validationResult.errors.length}`);
@@ -2243,6 +2299,7 @@ Analyze the existing project structure and implement the task following the patt
           const fixResult = await this.autoFixBuildErrors(actualProjectPath, validationResult);
           
           if (fixResult.success) {
+            await appendBuildLog('Build validation auto-fix completed');
             console.log(`[MCP Server] ✅ ${fixResult.message}`);
             console.log('[MCP Server] Build validation and auto-fix completed successfully');
             buildValidationPassed = true;
@@ -2252,10 +2309,12 @@ Analyze the existing project structure and implement the task following the patt
             buildValidationPassed = false;
           }
         } else {
+          await appendBuildLog('Build validation passed');
           console.log('[MCP Server] ✅ Build validation passed - no errors detected');
           buildValidationPassed = true;
         }
       } catch (validationError) {
+        await appendBuildLog('Build validation check failed', 'error');
         console.error('[MCP Server] ❌ Build validation check failed:', validationError);
         console.warn('[MCP Server] ⚠️ Will commit changes despite validation failure to preserve work');
         buildValidationPassed = false;
@@ -2318,6 +2377,7 @@ Analyze the existing project structure and implement the task following the patt
       // Auto-commit changes if GitHub token provided and files changed (even with build errors)
       if (mergedConfig.gitHubToken && filesChanged.length > 0) {
         try {
+          await appendBuildLog(`Committing ${filesChanged.length} changed files...`);
           // Warn if build validation failed but still commit
           if (!buildValidationPassed) {
             console.warn('[MCP Server] ⚠️ Build has errors, but committing changes anyway to preserve work');
@@ -2340,6 +2400,7 @@ Analyze the existing project structure and implement the task following the patt
           );
           
           if (result.success) {
+            await appendBuildLog(`Commit successful (${result.changesCount ?? filesChanged.length} files)`);
             console.log(`[MCP Server] ✅ ${result.message}`);
             if (result.changesCount && result.changesCount > 0) {
               console.log(`[MCP Server] 📊 Committed ${result.changesCount} files`);
@@ -2348,32 +2409,56 @@ Analyze the existing project structure and implement the task following the patt
               console.warn('[MCP Server] ⚠️ Changes committed despite build errors - review and fix manually');
             }
           } else {
+            await appendBuildLog(`Auto-commit failed: ${result.message}`, 'error');
             console.error(`[MCP Server] ❌ Auto-commit failed: ${result.message}`);
           }
         } catch (commitError) {
+          await appendBuildLog('Auto-commit failed', 'error');
           console.error('[MCP Server] ❌ Auto-commit failed:', commitError);
           // Don't fail the operation, just log the error and continue
         }
       } else if (!mergedConfig.gitHubToken) {
+        await appendBuildLog('No GitHub token - skipping auto-commit');
         console.log('[MCP Server] ℹ️ No GitHub token provided - skipping auto-commit');
         console.log(`[MCP Server] Debug: supabaseClient=${!!args.supabaseClient}, userId=${args.userId || 'missing'}, projectPath=${args.projectPath}`);
       } else if (filesChanged.length === 0) {
+        await appendBuildLog('No files changed - skipping commit');
         console.log('[MCP Server] ℹ️ No files changed - skipping commit');
       }
       
       // Extract database migrations if any were created
+      await appendBuildLog('Checking for new database migrations...');
       console.log('[MCP Server] 🔍 Checking for new database migrations...');
       const migrationsData = await this.extractNewMigrations(actualProjectPath);
 
       if (migrationsData.hasMigrations) {
+        await appendBuildLog(`Found ${migrationsData.migrations.length} migration(s)`);
         console.log(`[MCP Server] 📊 Found ${migrationsData.migrations.length} migration(s)`);
         migrationsData.migrations.forEach(m => {
           console.log(`[MCP Server]   📄 ${m.filename}: ${m.description}`);
         });
       } else {
+        await appendBuildLog('No new migrations detected');
         console.log('[MCP Server] ℹ️ No new migrations detected');
       }
       
+      await appendBuildLog('Prompt step completed successfully');
+
+      // Insert mcp_log with mcp_type='completed' so UI can detect step completion and move to next prompt
+      if (args.buildId && args.supabaseClient) {
+        try {
+          await args.supabaseClient.from('build_logs').insert({
+            build_id: args.buildId,
+            log_type: 'mcp_log',
+            mcp_type: 'completed',
+            message: 'Prompt step completed',
+            created_at: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn('[MCP Server] Failed to insert completed mcp_log (non-blocking):', e instanceof Error ? e.message : e);
+        }
+      }
+
       return {
         content: [
           {
@@ -2407,9 +2492,33 @@ Analyze the existing project structure and implement the task following the patt
     } catch (error) {
       console.error('[MCP Server] Cursor execution failed:', error);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      if (args.buildId && args.supabaseClient) {
+        try {
+          await args.supabaseClient.from('build_logs').insert({
+            build_id: args.buildId,
+            log_type: process.env.MCP_BUILD_LOG_TYPE_ERROR ?? 'build_log',
+            message: `Prompt execution failed: ${errorMessage}`.substring(0, 2000),
+            created_at: new Date().toISOString(),
+          });
+        } catch (e) {
+          // ignore
+        }
+      }
       
       // If cursor-agent failed, try fallback method
       if (errorMessage.includes('cursor-agent') || errorMessage.includes('not found')) {
+        if (args.buildId && args.supabaseClient) {
+          try {
+            await args.supabaseClient.from('build_logs').insert({
+              build_id: args.buildId,
+              log_type: 'build_log',
+              message: 'Falling back to task file method',
+              created_at: new Date().toISOString(),
+            });
+          } catch (e) {
+            // ignore
+          }
+        }
         console.log('[MCP Server] Falling back to task file method...');
         return await this.executePromptFallback(args, startTime);
       }
@@ -2649,6 +2758,21 @@ This task was created by ScopesFlow automation. To complete:
       
       console.log(`[MCP Server] ✓ Task file created: ${taskFile}`);
       console.log(`[MCP Server] ⚠ Manual intervention required - open project in Cursor IDE`);
+
+      // Insert mcp_log with mcp_type='completed' so UI can detect step completion
+      if (args.buildId && args.supabaseClient) {
+        try {
+          await args.supabaseClient.from('build_logs').insert({
+            build_id: args.buildId,
+            log_type: 'mcp_log',
+            mcp_type: 'completed',
+            message: 'Prompt step completed (fallback: task file created)',
+            created_at: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn('[MCP Server] Failed to insert completed mcp_log (non-blocking):', e instanceof Error ? e.message : e);
+        }
+      }
       
       const filesChanged = [path.relative(args.projectPath, taskFile)];
       
@@ -3044,8 +3168,8 @@ This task was created by ScopesFlow automation. To complete:
       }, this.DEV_SERVER_CHECK_TIMEOUT);
       
       try {
-        // Start dev server
-        devProcess = spawn('npm', ['run', 'dev'], {
+        // Start dev server (use single command string with empty args to avoid DEP0190 deprecation)
+        devProcess = spawn('npm run dev', [], {
           cwd: projectPath,
           shell: true,
           stdio: ['ignore', 'pipe', 'pipe']
@@ -3247,12 +3371,14 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
 
   /**
    * Execute cursor-agent command with real-time streaming output
-   * Parses JSON stream and logs all events as they occur
+   * Parses JSON stream and logs all events as they occur.
+   * When onBuildLog is provided (e.g. from automated build), each event is also sent to build_logs for realtime following.
    */
   private async executeCursorAgentStreaming(
     command: string,
     cwd: string | undefined,
-    timeout: number
+    timeout: number,
+    onBuildLog?: (message: string, level?: 'info' | 'error') => void | Promise<void>
   ): Promise<{ stdout: string; stderr: string; logs: Array<{ timestamp: string; type: string; message: string; data?: any }> }> {
     return new Promise((resolve, reject) => {
       let stdout = '';
@@ -3262,7 +3388,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const logs: Array<{ timestamp: string; type: string; message: string; data?: any }> = [];
       const startTime = Date.now();
       
-      // Helper to add log entry
+      // Helper to add log entry and optionally stream to build_logs
       const addLog = (type: string, message: string, data?: any) => {
         logs.push({
           timestamp: new Date().toISOString(),
@@ -3270,13 +3396,18 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           message,
           data
         });
+        if (onBuildLog) {
+          const level = type === 'agent_error' || type === 'warning' ? 'error' : 'info';
+          const line = `[Agent] ${type}: ${message}`.substring(0, 500);
+          Promise.resolve(onBuildLog(line, level)).catch(() => {});
+        }
       };
       
       console.log('[MCP Server] Starting cursor-agent with streaming output...');
       addLog('info', 'Starting cursor-agent with streaming output');
       
-      // Spawn the process
-      const childProcess = spawn(command, {
+      // Spawn the process (empty args array to avoid DEP0190 deprecation with shell: true)
+      const childProcess = spawn(command, [], {
         cwd,
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe']
@@ -3918,6 +4049,22 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
   }
 
   /**
+   * Sanitize a project/repo name for GitHub (alphanumeric, hyphens, underscores only).
+   * GitHub rejects names with spaces, em dashes, or other special characters.
+   */
+  private sanitizeRepoNameForGitHub(name: string): string {
+    if (!name || typeof name !== 'string') return 'repo';
+    let sanitized = name
+      .replace(/\s+/g, '-')                    // spaces -> hyphen
+      .replace(/[\u2013\u2014\u2015\u2212]/g, '-')  // en/em dash, horizontal bar, minus -> hyphen
+      .replace(/[^a-zA-Z0-9._-]/g, '')         // keep only valid chars
+      .replace(/[-._]+/g, '-')                 // collapse consecutive separators
+      .replace(/^[-._]+|[-._]+$/g, '')         // trim leading/trailing
+      .toLowerCase();
+    return sanitized || 'repo';
+  }
+
+  /**
    * Extract repository name from GitHub URL
    */
   private extractRepoName(gitUrl: string): string {
@@ -3944,6 +4091,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     gitHubToken: string,
     isPrivate: boolean = false
   ): Promise<{ success: boolean; repoUrl?: string; message: string }> {
+    const sanitizedRepoName = this.sanitizeRepoNameForGitHub(repoName);
     try {
       const { Octokit } = await import('@octokit/rest');
       const octokit = new Octokit({ auth: gitHubToken });
@@ -3953,7 +4101,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         const { data: user } = await octokit.users.getAuthenticated();
         const { data: existingRepo } = await octokit.repos.get({
           owner: user.login,
-          repo: repoName
+          repo: sanitizedRepoName
         });
         
         console.log('[MCP Server] 📦 Repository already exists:', existingRepo.html_url);
@@ -3965,11 +4113,11 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       } catch (notFoundError: any) {
         // Repository doesn't exist, create it
         if (notFoundError.status === 404) {
-          console.log('[MCP Server] 🆕 Creating new GitHub repository:', repoName);
+          console.log('[MCP Server] 🆕 Creating new GitHub repository:', sanitizedRepoName);
           
           const { data: user } = await octokit.users.getAuthenticated();
           const { data: newRepo } = await octokit.repos.createForAuthenticatedUser({
-            name: repoName,
+            name: sanitizedRepoName,
             private: isPrivate,
             auto_init: false, // CRITICAL: Don't create README/gitignore
             description: `Created by ScopesFlow MCP Server`
@@ -5140,7 +5288,8 @@ module.exports = {
     buildId: string,
     supabaseUrl: string,
     accessToken: string,
-    anonKey: string
+    anonKey: string,
+    supabaseServiceRoleKey?: string
   ): Promise<void> {
     const createProjectFn = (config: unknown) => {
       const c = config as Record<string, unknown>;
@@ -5162,6 +5311,7 @@ module.exports = {
         supabaseUrl,
         accessToken,
         anonKey,
+        supabaseServiceRoleKey,
         createProjectFn,
         executePromptFn,
       }).catch((err) => {
@@ -5244,8 +5394,9 @@ module.exports = {
               supabaseUrl?: string;
               accessToken?: string;
               anonKey?: string;
+              supabaseServiceRoleKey?: string;
             };
-            const { buildId, supabaseUrl, accessToken, anonKey } = payload;
+            const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey } = payload;
             if (!buildId || !supabaseUrl || !accessToken || !anonKey) {
               const missing = [
                 !buildId && 'buildId',
@@ -5257,7 +5408,8 @@ module.exports = {
               res.end(JSON.stringify({ error: `Missing required fields: ${missing.join(', ')}` }));
               return;
             }
-            this.runBuild(buildId, supabaseUrl, accessToken, anonKey)
+            const serviceRoleKey = supabaseServiceRoleKey || process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
+            this.runBuild(buildId, supabaseUrl, accessToken, anonKey, serviceRoleKey || undefined)
               .then(() => {
                 res.writeHead(200, cors);
                 res.end(JSON.stringify({ started: true }));
