@@ -1635,21 +1635,36 @@ When implementing this project:
       // If GitHub token is still missing and we have Supabase client + user ID, fetch from DB
       if (!mergedConfig.gitHubToken && args.supabaseClient && args.userId) {
         try {
-          console.log('[MCP Server] 🔍 Fetching GitHub auth from database...');
-          const { data: ghRow } = await args.supabaseClient
+          console.log(`[MCP Server] 🔍 Fetching GitHub auth from database for user_id: ${args.userId}`);
+          const { data: ghRow, error: ghError } = await args.supabaseClient
             .from('github_auth')
             .select('access_token, login, email')
             .eq('user_id', args.userId)
             .maybeSingle();
-          if (ghRow && typeof ghRow === 'object') {
+          
+          if (ghError) {
+            console.warn(`[MCP Server] ⚠️ Error fetching GitHub auth: ${ghError.message}`);
+          } else if (ghRow && typeof ghRow === 'object') {
             const row = ghRow as { access_token?: string; login?: string; email?: string };
-            mergedConfig.gitHubToken = row.access_token;
-            mergedConfig.gitUserName = mergedConfig.gitUserName || row.login;
-            mergedConfig.gitUserEmail = mergedConfig.gitUserEmail || row.email;
-            console.log('[MCP Server] ✅ Loaded GitHub auth from database');
+            if (row.access_token) {
+              mergedConfig.gitHubToken = row.access_token;
+              mergedConfig.gitUserName = mergedConfig.gitUserName || row.login;
+              mergedConfig.gitUserEmail = mergedConfig.gitUserEmail || row.email;
+              console.log(`[MCP Server] ✅ Loaded GitHub auth from database (token: ${row.access_token.slice(0, 4)}...)`);
+            } else {
+              console.warn(`[MCP Server] ⚠️ GitHub auth row found but access_token is empty`);
+            }
+          } else {
+            console.warn(`[MCP Server] ⚠️ No GitHub auth found for user_id: ${args.userId}`);
           }
         } catch (error) {
-          console.warn('[MCP Server] ⚠️ Failed to fetch GitHub auth from database:', error instanceof Error ? error.message : 'Unknown error');
+          console.warn('[MCP Server] ⚠️ Exception fetching GitHub auth from database:', error instanceof Error ? error.message : 'Unknown error');
+        }
+      } else if (!mergedConfig.gitHubToken) {
+        if (!args.supabaseClient) {
+          console.warn('[MCP Server] ⚠️ No Supabase client provided - cannot fetch GitHub auth from DB');
+        } else if (!args.userId) {
+          console.warn('[MCP Server] ⚠️ No user ID provided - cannot fetch GitHub auth from DB');
         }
       }
 
@@ -2247,6 +2262,43 @@ Analyze the existing project structure and implement the task following the patt
       }
       
       console.log('[MCP Server] ========================================');
+      
+      // Reload git config before commit check to ensure we have the latest GitHub token
+      // (it may have been fetched from DB and saved after initial load)
+      const latestGitConfig = await this.loadProjectGitConfig(args.projectPath);
+      if (latestGitConfig?.gitHubToken && !mergedConfig.gitHubToken) {
+        mergedConfig.gitHubToken = latestGitConfig.gitHubToken;
+        mergedConfig.gitUserName = mergedConfig.gitUserName || latestGitConfig.gitUserName;
+        mergedConfig.gitUserEmail = mergedConfig.gitUserEmail || latestGitConfig.gitUserEmail;
+        mergedConfig.gitRepository = mergedConfig.gitRepository || latestGitConfig.gitRepository;
+        console.log(`[MCP Server] ✅ Reloaded GitHub token from project config`);
+      }
+      
+      // If still no token and we have Supabase client + user ID, try fetching from DB one more time
+      if (!mergedConfig.gitHubToken && args.supabaseClient && args.userId) {
+        try {
+          console.log(`[MCP Server] 🔍 Final attempt: Fetching GitHub auth from database for user_id: ${args.userId}`);
+          const { data: ghRow, error: ghError } = await args.supabaseClient
+            .from('github_auth')
+            .select('access_token, login, email')
+            .eq('user_id', args.userId)
+            .maybeSingle();
+          
+          if (!ghError && ghRow && typeof ghRow === 'object') {
+            const row = ghRow as { access_token?: string; login?: string; email?: string };
+            if (row.access_token) {
+              mergedConfig.gitHubToken = row.access_token;
+              mergedConfig.gitUserName = mergedConfig.gitUserName || row.login;
+              mergedConfig.gitUserEmail = mergedConfig.gitUserEmail || row.email;
+              // Save to project config for future use
+              await this.saveProjectGitConfig(args.projectPath, mergedConfig);
+              console.log(`[MCP Server] ✅ Fetched and saved GitHub token from database`);
+            }
+          }
+        } catch (error) {
+          // Silent fail - we'll just skip commit
+        }
+      }
       
       // Auto-commit changes if GitHub token provided and files changed (even with build errors)
       if (mergedConfig.gitHubToken && filesChanged.length > 0) {

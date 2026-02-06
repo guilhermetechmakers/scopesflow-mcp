@@ -125,37 +125,52 @@ export async function runBuildLoop(
   };
 
   // Refresh JWT token if it's about to expire (within 1 minute)
+  // Note: When using header-based auth (access token in headers), there may be no stored session.
+  // In that case, we allow operations to proceed - they will fail gracefully if token is expired.
   const refreshTokenIfNeeded = async (): Promise<boolean> => {
     try {
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError) {
-        console.warn('[BuildRunner] Failed to check session:', sessionError.message);
-        return false;
+      
+      // If we have a session, check expiration and refresh if needed
+      if (session && !sessionError) {
+        const expiresAt = session.expires_at;
+        if (expiresAt && expiresAt * 1000 < Date.now() + 60000) {
+          console.log('[BuildRunner] 🔄 Token expiring soon, refreshing...');
+          const { data, error: refreshError } = await supabase.auth.refreshSession();
+          if (refreshError) {
+            console.warn('[BuildRunner] Failed to refresh token:', refreshError.message);
+            return false;
+          }
+          if (data.session) {
+            console.log('[BuildRunner] ✅ Token refreshed successfully');
+            return true;
+          }
+        }
+        return true; // Token is still valid
       }
       
-      if (!session) {
-        console.warn('[BuildRunner] No active session found');
-        return false;
-      }
-
-      // Check if token expires in less than 1 minute
-      const expiresAt = session.expires_at;
-      if (expiresAt && expiresAt * 1000 < Date.now() + 60000) {
-        console.log('[BuildRunner] 🔄 Token expiring soon, refreshing...');
-        const { data, error: refreshError } = await supabase.auth.refreshSession();
-        if (refreshError) {
-          console.warn('[BuildRunner] Failed to refresh token:', refreshError.message);
-          return false;
-        }
-        if (data.session) {
-          console.log('[BuildRunner] ✅ Token refreshed successfully');
-          return true;
+      // No session found - this is expected when using header-based auth (access token in headers)
+      // Try to refresh anyway - Supabase may be able to refresh using the access token in headers
+      if (!session && !sessionError) {
+        try {
+          const { data, error: refreshError } = await supabase.auth.refreshSession();
+          if (!refreshError && data.session) {
+            console.log('[BuildRunner] ✅ Token refreshed successfully (header-based auth)');
+            return true;
+          }
+          // If refresh fails silently, that's okay - operations will proceed and fail gracefully if needed
+        } catch (refreshErr) {
+          // Refresh failed silently - operations will proceed
         }
       }
-      return true; // Token is still valid
+      
+      // Allow operations to proceed - they will fail gracefully if token is expired
+      // This handles both header-based auth (no session) and session errors
+      return true;
     } catch (error) {
-      console.warn('[BuildRunner] Token refresh check failed:', error instanceof Error ? error.message : 'Unknown error');
-      return false;
+      // On any error, allow operations to proceed
+      // Database operations will handle expired tokens gracefully
+      return true;
     }
   };
 
@@ -412,9 +427,14 @@ export async function runBuildLoop(
         userId: row.user_id,
       };
       if (githubAuth) {
-        if (githubAuth.gitHubToken) executeArgs.gitHubToken = githubAuth.gitHubToken;
+        if (githubAuth.gitHubToken) {
+          executeArgs.gitHubToken = githubAuth.gitHubToken;
+          console.log(`[BuildRunner] ✅ Passing GitHub token to executePrompt (token: ${githubAuth.gitHubToken.slice(0, 4)}...)`);
+        }
         if (githubAuth.gitUserName) executeArgs.gitUserName = githubAuth.gitUserName;
         if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
+      } else {
+        console.warn(`[BuildRunner] ⚠️ No GitHub auth available to pass to executePrompt`);
       }
       await executePromptFn(executeArgs);
       done++;
@@ -472,21 +492,32 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
 
   let githubAuth: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string } | undefined;
   try {
-    const { data: ghRow } = await supabase
+    console.log(`[BuildRunner] 🔍 Fetching GitHub auth for user_id: ${user.id}`);
+    const { data: ghRow, error: ghError } = await supabase
       .from('github_auth')
       .select('access_token, login, email')
       .eq('user_id', user.id)
       .maybeSingle();
-    if (ghRow && typeof ghRow === 'object') {
+    
+    if (ghError) {
+      console.warn(`[BuildRunner] ⚠️ Error fetching GitHub auth: ${ghError.message}`);
+    } else if (ghRow && typeof ghRow === 'object') {
       const row = ghRow as { access_token?: string; login?: string; email?: string };
       githubAuth = {
         gitHubToken: row.access_token,
         gitUserName: row.login,
         gitUserEmail: row.email,
       };
+      if (githubAuth.gitHubToken) {
+        console.log(`[BuildRunner] ✅ GitHub auth found for user (token: ${githubAuth.gitHubToken.slice(0, 4)}...)`);
+      } else {
+        console.warn(`[BuildRunner] ⚠️ GitHub auth row found but access_token is empty`);
+      }
+    } else {
+      console.warn(`[BuildRunner] ⚠️ No GitHub auth found for user_id: ${user.id}`);
     }
-  } catch {
-    // optional
+  } catch (error) {
+    console.warn(`[BuildRunner] ⚠️ Exception fetching GitHub auth:`, error instanceof Error ? error.message : 'Unknown error');
   }
 
   await runBuildLoop(supabase, buildId, {
