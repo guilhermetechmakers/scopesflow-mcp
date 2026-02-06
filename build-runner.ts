@@ -1,3 +1,4 @@
+import * as path from 'path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 /** Config passed to create-project (matches server CursorProjectConfig shape). */
@@ -216,24 +217,55 @@ export async function runBuildLoop(
   console.error('[BuildRunner] Merged cursorConfig:', JSON.stringify(sanitizeRecord(mergedCursorConfig), null, 2));
 
   let prompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
+  let promptSource: string | undefined = prompts.length > 0 ? 'configuration.prompts' : undefined;
   if (prompts.length === 0) {
-    const { data: promptRows } = await supabase
+    const { data: promptRows, error: promptError } = await supabase
       .from('automated_build_prompts')
       .select('prompt, content, order')
       .eq('build_id', buildId)
       .order('order', { ascending: true });
+    if (promptError) {
+      log(`Failed to query automated_build_prompts: ${promptError.message}`, 'error');
+      await appendLog(`Failed to query automated_build_prompts: ${promptError.message}`, 'error');
+    }
     if (Array.isArray(promptRows)) {
-      prompts = promptRows.map((r: { prompt?: string; content?: string }) => (r.prompt ?? r.content ?? '')).filter(Boolean);
+      prompts = promptRows
+        .map((r: { prompt?: string; content?: string }) => (r.prompt ?? r.content ?? ''))
+        .filter(Boolean);
+      if (prompts.length > 0) promptSource = 'automated_build_prompts';
     }
   }
   if (prompts.length === 0) {
-    const message = `No prompts found for build ${buildId}. Check automated_build_prompts and configuration.prompts.`;
+    const projectId =
+      (configuration as { projectId?: string; project_id?: string }).projectId ??
+      (configuration as { projectId?: string; project_id?: string }).project_id;
+    if (projectId) {
+      const { data: flowchartRows, error: flowchartError } = await supabase
+        .from('flowchart_items')
+        .select('prompt, prompt_content, content, sequence_order')
+        .eq('project_id', projectId)
+        .eq('type', 'prompt')
+        .order('sequence_order', { ascending: true });
+      if (flowchartError) {
+        log(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
+        await appendLog(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
+      }
+      if (Array.isArray(flowchartRows)) {
+        prompts = flowchartRows
+          .map((r: { prompt?: string; prompt_content?: string; content?: string }) => (r.prompt_content ?? r.prompt ?? r.content ?? ''))
+          .filter(Boolean);
+        if (prompts.length > 0) promptSource = 'flowchart_items';
+      }
+    }
+  }
+  if (prompts.length === 0) {
+    const message = `No prompts found for build ${buildId}. Checked configuration.prompts, automated_build_prompts, and flowchart_items.`;
     log(message, 'error');
     await appendLog(message, 'error');
     await updateStatus('failed');
     return;
   }
-  await appendLog(`Loaded ${prompts.length} prompts`);
+  await appendLog(`Loaded ${prompts.length} prompts from ${promptSource ?? 'unknown source'}`);
 
   const hasString = (value: unknown): value is string =>
     typeof value === 'string' && value.trim().length > 0;
@@ -249,7 +281,6 @@ export async function runBuildLoop(
 
   const missingFields: string[] = [];
   if (!hasString(rawProjectName)) missingFields.push('projectName');
-  if (!hasString(rawProjectPath)) missingFields.push('projectPath');
   if (!hasString(rawFramework)) missingFields.push('framework');
   if (!hasString(rawPackageManager)) missingFields.push('packageManager');
   if (missingFields.length > 0) {
@@ -276,7 +307,14 @@ export async function runBuildLoop(
     await appendLog('Build started');
 
     const projectName = (rawProjectName as string).trim();
-    const projectPath = (rawProjectPath as string).trim();
+    const baseDir =
+      process.env.MCP_BUILD_PROJECTS_DIR || process.env.TMPDIR || process.cwd();
+    const projectPath = hasString(rawProjectPath)
+      ? rawProjectPath.trim()
+      : path.join(baseDir, 'builds', buildId, projectName);
+    if (!hasString(rawProjectPath)) {
+      await appendLog(`projectPath missing; using default path ${projectPath}`);
+    }
 
     const createConfig: BuildCursorConfig = {
       ...(mergedCursorConfig as unknown as BuildCursorConfig),
