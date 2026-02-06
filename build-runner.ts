@@ -495,18 +495,19 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
     console.log(`[BuildRunner] 🔍 Fetching GitHub auth for user_id: ${user.id}`);
     const { data: ghRow, error: ghError } = await supabase
       .from('github_auth')
-      .select('access_token, login, email')
+      .select('access_token')
       .eq('user_id', user.id)
       .maybeSingle();
     
     if (ghError) {
       console.warn(`[BuildRunner] ⚠️ Error fetching GitHub auth: ${ghError.message}`);
     } else if (ghRow && typeof ghRow === 'object') {
-      const row = ghRow as { access_token?: string; login?: string; email?: string };
+      const row = ghRow as { access_token?: string };
       githubAuth = {
         gitHubToken: row.access_token,
-        gitUserName: row.login,
-        gitUserEmail: row.email,
+        // Note: login and email columns don't exist in github_auth table
+        gitUserName: undefined,
+        gitUserEmail: undefined,
       };
       if (githubAuth.gitHubToken) {
         console.log(`[BuildRunner] ✅ GitHub auth found for user (token: ${githubAuth.gitHubToken.slice(0, 4)}...)`);

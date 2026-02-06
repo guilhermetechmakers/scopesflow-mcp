@@ -1638,18 +1638,18 @@ When implementing this project:
           console.log(`[MCP Server] 🔍 Fetching GitHub auth from database for user_id: ${args.userId}`);
           const { data: ghRow, error: ghError } = await args.supabaseClient
             .from('github_auth')
-            .select('access_token, login, email')
+            .select('access_token')
             .eq('user_id', args.userId)
             .maybeSingle();
           
           if (ghError) {
             console.warn(`[MCP Server] ⚠️ Error fetching GitHub auth: ${ghError.message}`);
           } else if (ghRow && typeof ghRow === 'object') {
-            const row = ghRow as { access_token?: string; login?: string; email?: string };
+            const row = ghRow as { access_token?: string };
             if (row.access_token) {
               mergedConfig.gitHubToken = row.access_token;
-              mergedConfig.gitUserName = mergedConfig.gitUserName || row.login;
-              mergedConfig.gitUserEmail = mergedConfig.gitUserEmail || row.email;
+              // Note: login and email columns don't exist in github_auth table
+              // gitUserName and gitUserEmail will remain from existing config or args if provided
               console.log(`[MCP Server] ✅ Loaded GitHub auth from database (token: ${row.access_token.slice(0, 4)}...)`);
             } else {
               console.warn(`[MCP Server] ⚠️ GitHub auth row found but access_token is empty`);
@@ -2281,18 +2281,18 @@ Analyze the existing project structure and implement the task following the patt
             console.log(`[MCP Server] 🔍 Final attempt: Fetching GitHub auth from database for user_id: ${args.userId}`);
             const { data: ghRow, error: ghError } = await args.supabaseClient
               .from('github_auth')
-              .select('access_token, login, email')
+              .select('access_token')
               .eq('user_id', args.userId)
               .maybeSingle();
             
             if (ghError) {
               console.warn(`[MCP Server] ⚠️ Error fetching GitHub auth (final attempt): ${ghError.message}`);
             } else if (ghRow && typeof ghRow === 'object') {
-              const row = ghRow as { access_token?: string; login?: string; email?: string };
+              const row = ghRow as { access_token?: string };
               if (row.access_token) {
                 mergedConfig.gitHubToken = row.access_token;
-                mergedConfig.gitUserName = mergedConfig.gitUserName || row.login;
-                mergedConfig.gitUserEmail = mergedConfig.gitUserEmail || row.email;
+                // Note: login and email columns don't exist in github_auth table
+                // gitUserName and gitUserEmail will remain from existing config or args if provided
                 // Save to project config for future use
                 await this.saveProjectGitConfig(args.projectPath, mergedConfig);
                 console.log(`[MCP Server] ✅ Fetched and saved GitHub token from database (token: ${row.access_token.slice(0, 4)}...)`);
