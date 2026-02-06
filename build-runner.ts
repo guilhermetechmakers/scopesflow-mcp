@@ -41,6 +41,8 @@ export interface BuildExecutePromptArgs {
   isFirstPrompt?: boolean;
   retryCount?: number;
   isRetry?: boolean;
+  supabaseClient?: SupabaseClient;
+  userId?: string;
 }
 
 export type CreateProjectFn = (config: BuildCursorConfig) => Promise<unknown>;
@@ -336,6 +338,8 @@ export async function runBuildLoop(
         isFirstPrompt: i === 0,
         retryCount: 0,
         isRetry: false,
+        supabaseClient: supabase,
+        userId: row.user_id,
       };
       if (githubAuth) {
         if (githubAuth.gitHubToken) executeArgs.gitHubToken = githubAuth.gitHubToken;

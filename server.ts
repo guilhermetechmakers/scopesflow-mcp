@@ -53,6 +53,8 @@ interface ExecutePromptArgs {
   isFirstPrompt?: boolean;   // NEW: Flag for first-time setup vs subsequent prompts
   retryCount?: number;       // NEW: Track retry attempts for timeout fallback
   isRetry?: boolean;         // NEW: Flag to indicate if this is a retry attempt
+  supabaseClient?: SupabaseClient; // NEW: Optional Supabase client for fetching GitHub auth
+  userId?: string;           // NEW: Optional user ID for fetching GitHub auth
 }
 interface ProjectPathArgs {
   projectPath: string;
@@ -1109,7 +1111,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
   }
 
   private validateExecutePromptArgs(args: Record<string, unknown>): ExecutePromptArgs {
-    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry } = args;
+    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId } = args;
     
     if (typeof prompt !== 'string') throw new Error('Prompt must be a string');
     if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
@@ -1126,7 +1128,9 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       gitRepository: typeof gitRepository === 'string' ? gitRepository : undefined,
       isFirstPrompt: typeof isFirstPrompt === 'boolean' ? isFirstPrompt : false,
       retryCount: typeof retryCount === 'number' ? retryCount : undefined,
-      isRetry: typeof isRetry === 'boolean' ? isRetry : false
+      isRetry: typeof isRetry === 'boolean' ? isRetry : false,
+      supabaseClient: supabaseClient instanceof Object && 'from' in supabaseClient ? supabaseClient as SupabaseClient : undefined,
+      userId: typeof userId === 'string' ? userId : undefined
     };
   }
 
@@ -1621,15 +1625,36 @@ When implementing this project:
       // Load existing git configuration and merge with provided parameters
       console.log('[MCP Server] 🔍 Loading git configuration...');
       const existingConfig = await this.loadProjectGitConfig(args.projectPath);
-      const mergedConfig: ProjectGitConfig = {
+      let mergedConfig: ProjectGitConfig = {
         gitRepository: args.gitRepository || existingConfig?.gitRepository,
         gitHubToken: args.gitHubToken || existingConfig?.gitHubToken,
         gitUserName: args.gitUserName || existingConfig?.gitUserName,
         gitUserEmail: args.gitUserEmail || existingConfig?.gitUserEmail
       };
 
-      // Save updated configuration if any git parameters were provided
-      if (args.gitRepository || args.gitHubToken || args.gitUserName || args.gitUserEmail) {
+      // If GitHub token is still missing and we have Supabase client + user ID, fetch from DB
+      if (!mergedConfig.gitHubToken && args.supabaseClient && args.userId) {
+        try {
+          console.log('[MCP Server] 🔍 Fetching GitHub auth from database...');
+          const { data: ghRow } = await args.supabaseClient
+            .from('github_auth')
+            .select('access_token, login, email')
+            .eq('user_id', args.userId)
+            .maybeSingle();
+          if (ghRow && typeof ghRow === 'object') {
+            const row = ghRow as { access_token?: string; login?: string; email?: string };
+            mergedConfig.gitHubToken = row.access_token;
+            mergedConfig.gitUserName = mergedConfig.gitUserName || row.login;
+            mergedConfig.gitUserEmail = mergedConfig.gitUserEmail || row.email;
+            console.log('[MCP Server] ✅ Loaded GitHub auth from database');
+          }
+        } catch (error) {
+          console.warn('[MCP Server] ⚠️ Failed to fetch GitHub auth from database:', error instanceof Error ? error.message : 'Unknown error');
+        }
+      }
+
+      // Save updated configuration if any git parameters were provided or fetched from DB
+      if (args.gitRepository || args.gitHubToken || args.gitUserName || args.gitUserEmail || mergedConfig.gitHubToken) {
         await this.saveProjectGitConfig(args.projectPath, mergedConfig);
       }
 
