@@ -5320,6 +5320,17 @@ module.exports = {
     });
   }
 
+  /** Parse MCP tool result (content[0].text) to extract JSON. */
+  private parseMcpResult(res: { content?: Array<{ type?: string; text?: string }> }): Record<string, any> {
+    const text = res?.content?.[0]?.text;
+    if (!text) return {};
+    try {
+      return JSON.parse(text) as Record<string, any>;
+    } catch {
+      return {};
+    }
+  }
+
   /** CORS headers for /api/start-build (browser or Edge Function). */
   private getBuildApiCorsHeaders(): Record<string, string> {
     return {
@@ -5366,16 +5377,153 @@ module.exports = {
         return;
       }
       const url = req.url || '';
-      const isStartBuild = url === '/api/start-build' || url === '/api/start-build/';
+      const urlPath = url.split('?')[0];
+      console.error('[MCP Server] HTTP request:', req.method, urlPath, '(full:', url, ')');
       const cors = this.getBuildApiCorsHeaders();
 
-      if (isStartBuild && req.method === 'OPTIONS') {
+      if ((urlPath === '/api/create-project' || urlPath === '/api/create-project/' || urlPath === '/api/execute-prompt' || urlPath === '/api/execute-prompt/' || urlPath === '/api/start-build' || urlPath === '/api/start-build/') && req.method === 'OPTIONS') {
         res.writeHead(200, cors);
         res.end();
         return;
       }
 
-      if (isStartBuild && req.method === 'POST') {
+      // POST /api/create-project
+      if (req.method === 'POST' && (urlPath === '/api/create-project' || urlPath === '/api/create-project/')) {
+        console.error('[MCP Server] POST /api/create-project received');
+        if (apiKey) {
+          const headerKey = req.headers['x-api-key'];
+          if (headerKey !== apiKey) {
+            res.writeHead(401, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body || '{}') as {
+              buildId?: string; projectId?: string; projectName?: string; projectPath?: string;
+              framework?: string; packageManager?: string; template?: string;
+              gitHubToken?: string; gitUserName?: string; gitUserEmail?: string;
+              supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
+            };
+            const { buildId, projectId, projectName, projectPath, framework, packageManager, template, gitHubToken, gitUserName, gitUserEmail, supabaseUrl, anonKey, accessToken, serviceRoleKey } = data;
+            const hasServiceRole = !!serviceRoleKey;
+            const hasUserAuth = !!anonKey && !!accessToken;
+            if (!buildId || !projectId || !projectName || !projectPath || !framework || !packageManager || !supabaseUrl || (!hasServiceRole && !hasUserAuth)) {
+              res.writeHead(400, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: 'Missing required fields' }));
+              return;
+            }
+            const supabase: SupabaseClient = hasServiceRole
+              ? createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } })
+              : createClient(supabaseUrl, anonKey as string, { global: { headers: { Authorization: `Bearer ${accessToken}` } } });
+            const createRes = await this.createProject(this.validateCreateProjectArgs({
+              projectName, projectPath, framework, packageManager, template, gitHubToken, gitUserName, gitUserEmail,
+              name: projectName, path: projectPath,
+            }));
+            const createData = this.parseMcpResult(createRes);
+            if (!createData.success) {
+              try {
+                await supabase.from('build_logs').insert({
+                  build_id: buildId, log_type: 'build_log', message: createData.error || 'Project creation failed', created_at: new Date().toISOString(),
+                });
+              } catch (_) {}
+              res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: createData.error || 'Project creation failed' }));
+              return;
+            }
+            try {
+              await supabase.from('automated_builds').update({
+                ...(createData.projectPath && { cursor_project_path: createData.projectPath }),
+                ...(createData.gitRepository && { github_repository_url: createData.gitRepository }),
+                status: 'running', updated_at: new Date().toISOString(),
+              }).eq('id', buildId);
+              await supabase.from('build_logs').insert({
+                build_id: buildId, log_type: 'build_log', message: 'Project created successfully', created_at: new Date().toISOString(),
+              });
+            } catch (e) {
+              console.warn('[MCP Server] create-project: failed to update automated_builds/build_logs:', e);
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({
+              success: true,
+              projectPath: createData.projectPath || projectPath,
+              gitRepository: createData.gitRepository || null,
+            }));
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+          }
+        });
+        return;
+      }
+
+      // POST /api/execute-prompt
+      if (req.method === 'POST' && (urlPath === '/api/execute-prompt' || urlPath === '/api/execute-prompt/')) {
+        console.error('[MCP Server] POST /api/execute-prompt received');
+        if (apiKey) {
+          const headerKey = req.headers['x-api-key'];
+          if (headerKey !== apiKey) {
+            res.writeHead(401, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          try {
+            const data = JSON.parse(body || '{}') as {
+              buildId?: string; projectId?: string; promptId?: string; promptContent?: string; projectPath?: string;
+              timeout?: number; context?: string; supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
+            };
+            const { buildId, projectId, promptId, promptContent, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey } = data;
+            const hasServiceRole = !!serviceRoleKey;
+            const hasUserAuth = !!anonKey && !!accessToken;
+            if (!buildId || !projectId || !promptContent || !projectPath || !supabaseUrl || (!hasServiceRole && !hasUserAuth)) {
+              res.writeHead(400, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: 'Missing required fields' }));
+              return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ scheduled: true }));
+            setImmediate(async () => {
+              const supabase: SupabaseClient = hasServiceRole
+                ? createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } })
+                : createClient(supabaseUrl, anonKey as string, { global: { headers: { Authorization: `Bearer ${accessToken}` } } });
+              try {
+                const execRes = await this.executePrompt(this.validateExecutePromptArgs({
+                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined,
+                }));
+                const execData = this.parseMcpResult(execRes);
+                const success = !!execData.success;
+                await supabase.from('build_logs').insert({
+                  build_id: buildId, log_type: 'mcp_log', mcp_type: success ? 'completed' : 'failed',
+                  message: success ? 'Prompt execution completed' : (execData.error || 'Prompt execution failed'),
+                  created_at: new Date().toISOString(),
+                });
+              } catch (error) {
+                try {
+                  await supabase.from('build_logs').insert({
+                    build_id: buildId, log_type: 'mcp_log', mcp_type: 'failed',
+                    message: error instanceof Error ? error.message : 'Prompt execution failed',
+                    created_at: new Date().toISOString(),
+                  });
+                } catch (_) {}
+              }
+            });
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+          }
+        });
+        return;
+      }
+
+      // POST /api/start-build
+      if (req.method === 'POST' && (urlPath === '/api/start-build' || urlPath === '/api/start-build/')) {
         // Optional: API key check (plan §3.1)
         if (apiKey) {
           const headerKey = req.headers['x-api-key'];
@@ -5428,8 +5576,14 @@ module.exports = {
         return;
       }
 
+      console.error('[MCP Server] 404 - No handler for:', req.method, urlPath, '(full:', url, ')');
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found' }));
+      res.end(JSON.stringify({
+        error: 'Not found',
+        method: req.method,
+        url: urlPath,
+        availableEndpoints: ['/api/create-project', '/api/execute-prompt', '/api/start-build'],
+      }));
     });
 
     this.httpServer.on('upgrade', (req, socket, head) => {
@@ -5439,7 +5593,11 @@ module.exports = {
     });
 
     this.httpServer.listen(port, host, () => {
-      console.error(`ScopesFlow Cursor MCP Server running on http://${host}:${port} (ws upgrade + POST /api/start-build)`);
+      console.error(`ScopesFlow Cursor MCP Server running on http://${host}:${port}`);
+      console.error(`HTTP endpoints:`);
+      console.error(`  POST http://${host}:${port}/api/create-project`);
+      console.error(`  POST http://${host}:${port}/api/execute-prompt`);
+      console.error(`  POST http://${host}:${port}/api/start-build`);
     });
   }
 
