@@ -124,17 +124,66 @@ export async function runBuildLoop(
     return result;
   };
 
+  // Refresh JWT token if it's about to expire (within 1 minute)
+  const refreshTokenIfNeeded = async (): Promise<boolean> => {
+    try {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) {
+        console.warn('[BuildRunner] Failed to check session:', sessionError.message);
+        return false;
+      }
+      
+      if (!session) {
+        console.warn('[BuildRunner] No active session found');
+        return false;
+      }
+
+      // Check if token expires in less than 1 minute
+      const expiresAt = session.expires_at;
+      if (expiresAt && expiresAt * 1000 < Date.now() + 60000) {
+        console.log('[BuildRunner] 🔄 Token expiring soon, refreshing...');
+        const { data, error: refreshError } = await supabase.auth.refreshSession();
+        if (refreshError) {
+          console.warn('[BuildRunner] Failed to refresh token:', refreshError.message);
+          return false;
+        }
+        if (data.session) {
+          console.log('[BuildRunner] ✅ Token refreshed successfully');
+          return true;
+        }
+      }
+      return true; // Token is still valid
+    } catch (error) {
+      console.warn('[BuildRunner] Token refresh check failed:', error instanceof Error ? error.message : 'Unknown error');
+      return false;
+    }
+  };
+
   const updateStatus = async (status: string, progress?: number) => {
-    const payload: { status: string; progress?: number; updated_at?: string } = {
-      status,
-      updated_at: new Date().toISOString(),
-    };
-    if (progress !== undefined) payload.progress = progress;
-    const { error } = await supabase
-      .from('automated_builds')
-      .update(payload)
-      .eq('id', buildId);
-    if (error) log(`Failed to update status: ${error.message}`, 'error');
+    try {
+      // Attempt to refresh token before database operation
+      await refreshTokenIfNeeded();
+      
+      const payload: { status: string; progress?: number; updated_at?: string } = {
+        status,
+        updated_at: new Date().toISOString(),
+      };
+      if (progress !== undefined) payload.progress = progress;
+      
+      const { error } = await supabase
+        .from('automated_builds')
+        .update(payload)
+        .eq('id', buildId);
+      
+      if (error) {
+        log(`Failed to update status: ${error.message}`, 'error');
+        // Continue execution - don't throw (graceful degradation)
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      log(`Status update error (non-blocking): ${errorMessage}`, 'error');
+      // Continue execution - don't throw (graceful degradation)
+    }
   };
 
   // log_type must match DB CHECK constraint: 'build_log' or 'mcp_log'
@@ -145,20 +194,32 @@ export async function runBuildLoop(
     level === 'error' ? LOG_TYPE_ERROR : LOG_TYPE_INFO;
 
   const appendLog = async (message: string, level: string = 'info') => {
-    const logTypeValue = levelToLogType(level);
-    // Debug: log what we're trying to insert
-    if (process.env.DEBUG_BUILD_LOGS === 'true') {
-      console.error(`[BuildRunner] appendLog: level="${level}", log_type="${logTypeValue}", LOG_TYPE_INFO="${LOG_TYPE_INFO}", LOG_TYPE_ERROR="${LOG_TYPE_ERROR}"`);
-    }
-    const { error } = await supabase.from('build_logs').insert({
-      build_id: buildId,
-      log_type: logTypeValue,
-      message,
-      created_at: new Date().toISOString(),
-    });
-    if (error) {
-      log(`Failed to append log: ${error.message}`, 'error');
-      console.error(`[BuildRunner] Failed insert details: log_type="${logTypeValue}", level="${level}", env MCP_BUILD_LOG_TYPE_INFO="${process.env.MCP_BUILD_LOG_TYPE_INFO}", env MCP_BUILD_LOG_TYPE_ERROR="${process.env.MCP_BUILD_LOG_TYPE_ERROR}"`);
+    try {
+      // Attempt to refresh token before database operation
+      await refreshTokenIfNeeded();
+      
+      const logTypeValue = levelToLogType(level);
+      // Debug: log what we're trying to insert
+      if (process.env.DEBUG_BUILD_LOGS === 'true') {
+        console.error(`[BuildRunner] appendLog: level="${level}", log_type="${logTypeValue}", LOG_TYPE_INFO="${LOG_TYPE_INFO}", LOG_TYPE_ERROR="${LOG_TYPE_ERROR}"`);
+      }
+      
+      const { error } = await supabase.from('build_logs').insert({
+        build_id: buildId,
+        log_type: logTypeValue,
+        message,
+        created_at: new Date().toISOString(),
+      });
+      
+      if (error) {
+        log(`Failed to append log: ${error.message}`, 'error');
+        console.error(`[BuildRunner] Failed insert details: log_type="${logTypeValue}", level="${level}", env MCP_BUILD_LOG_TYPE_INFO="${process.env.MCP_BUILD_LOG_TYPE_INFO}", env MCP_BUILD_LOG_TYPE_ERROR="${process.env.MCP_BUILD_LOG_TYPE_ERROR}"`);
+        // Continue execution - don't throw (graceful degradation)
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      log(`Log append error (non-blocking): ${errorMessage}`, 'error');
+      // Continue execution - don't throw (graceful degradation)
     }
   };
 
@@ -234,21 +295,30 @@ export async function runBuildLoop(
       (configuration as { projectId?: string; project_id?: string }).projectId ??
       (configuration as { projectId?: string; project_id?: string }).project_id;
     if (projectId) {
-      const { data: flowchartRows, error: flowchartError } = await supabase
-        .from('flowchart_items')
-        .select('prompt, prompt_content, sequence_order')
-        .eq('project_id', projectId)
-        .eq('type', 'prompt')
-        .order('sequence_order', { ascending: true });
-      if (flowchartError) {
-        log(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
-        await appendLog(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
-      }
-      if (Array.isArray(flowchartRows)) {
-        prompts = flowchartRows
-          .map((r: { prompt?: string; prompt_content?: string }) => (r.prompt_content ?? r.prompt ?? ''))
-          .filter(Boolean);
-        if (prompts.length > 0) promptSource = 'flowchart_items';
+      try {
+        // Attempt to refresh token before database operation
+        await refreshTokenIfNeeded();
+        
+        const { data: flowchartRows, error: flowchartError } = await supabase
+          .from('flowchart_items')
+          .select('prompt, prompt_content, sequence_order')
+          .eq('project_id', projectId)
+          .eq('type', 'prompt')
+          .order('sequence_order', { ascending: true });
+        if (flowchartError) {
+          log(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
+          await appendLog(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
+        }
+        if (Array.isArray(flowchartRows)) {
+          prompts = flowchartRows
+            .map((r: { prompt?: string; prompt_content?: string }) => (r.prompt_content ?? r.prompt ?? ''))
+            .filter(Boolean);
+          if (prompts.length > 0) promptSource = 'flowchart_items';
+        }
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+        log(`Flowchart items query error (non-blocking): ${errorMessage}`, 'error');
+        // Continue execution - prompts will remain empty and build will fail gracefully
       }
     }
   }
