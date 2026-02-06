@@ -234,7 +234,7 @@ export async function runBuildLoop(
     if (projectId) {
       const { data: flowchartRows, error: flowchartError } = await supabase
         .from('flowchart_items')
-        .select('prompt, prompt_content, content, sequence_order')
+        .select('prompt, prompt_content, sequence_order')
         .eq('project_id', projectId)
         .eq('type', 'prompt')
         .order('sequence_order', { ascending: true });
@@ -244,7 +244,7 @@ export async function runBuildLoop(
       }
       if (Array.isArray(flowchartRows)) {
         prompts = flowchartRows
-          .map((r: { prompt?: string; prompt_content?: string; content?: string }) => (r.prompt_content ?? r.prompt ?? r.content ?? ''))
+          .map((r: { prompt?: string; prompt_content?: string }) => (r.prompt_content ?? r.prompt ?? ''))
           .filter(Boolean);
         if (prompts.length > 0) promptSource = 'flowchart_items';
       }
