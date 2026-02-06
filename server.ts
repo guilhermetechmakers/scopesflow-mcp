@@ -26,6 +26,7 @@ interface CursorProjectConfig {
   gitUserName?: string;      // NEW
   gitUserEmail?: string;     // NEW
   supabaseUrl?: string;      // NEW - Supabase project URL
+  supabaseAnonKey?: string;  // NEW - Supabase anon key (public)
   supabaseServiceRoleKey?: string; // NEW - Supabase service role key
   designPattern?: string;    // NEW - Design pattern/style for the project (DEPRECATED)
   designPatternSummary?: string;  // NEW - Short design pattern summary (DEPRECATED)
@@ -709,8 +710,10 @@ See DESIGN_RULES.md in the server root for complete guidelines.
                 gitUserName: { type: 'string', description: 'Git user name for commits' },
                 gitUserEmail: { type: 'string', description: 'Git user email for commits' },
                 supabaseUrl: { type: 'string', description: 'Supabase project URL (optional, also accepts supabase_url)' },
+                supabaseAnonKey: { type: 'string', description: 'Supabase anon key (optional, also accepts supabase_anon_key)' },
                 supabaseServiceRoleKey: { type: 'string', description: 'Supabase service role key (optional, also accepts supabase_service_role_key, supabaseServiceKey, or supabase_service_key)' },
                 supabase_url: { type: 'string', description: 'Supabase project URL - snake_case variant (optional)' },
+                supabase_anon_key: { type: 'string', description: 'Supabase anon key - snake_case variant (optional)' },
                 supabase_service_role_key: { type: 'string', description: 'Supabase service role key - snake_case variant (optional)' },
                 design_pattern: { type: 'string', description: 'Design pattern/style for the project (e.g., "modern dashboard", "landing page", "saas app") - DEPRECATED, use design pattern sections instead' },
                 design_pattern_summary: { type: 'string', description: 'Short design pattern summary (e.g., "modern-dark-dashboard", "saas-app", "landing-page") - DEPRECATED, use design pattern sections instead' },
@@ -914,7 +917,24 @@ See DESIGN_RULES.md in the server root for complete guidelines.
 
   // Validation methods with DEBUG LOGGING
   private validateCreateProjectArgs(args: Record<string, unknown>): CursorProjectConfig {
-    console.log('[MCP Server] validateCreateProjectArgs received:', args);
+    const maskSecret = (value: unknown): unknown => {
+      if (typeof value !== 'string') return value;
+      if (value.length <= 8) return '***';
+      return `${value.slice(0, 4)}...${value.slice(-4)}`;
+    };
+    const REDACT_KEYS = new Set([
+      'supabaseAnonKey',
+      'supabase_anon_key',
+      'supabaseServiceRoleKey',
+      'supabase_service_role_key',
+      'supabaseServiceKey',
+      'supabase_service_key',
+      'gitHubToken',
+    ]);
+    const sanitizedArgs = Object.fromEntries(
+      Object.entries(args).map(([key, value]) => [key, REDACT_KEYS.has(key) ? maskSecret(value) : value])
+    );
+    console.log('[MCP Server] validateCreateProjectArgs received:', sanitizedArgs);
     console.log('[MCP Server] All arg keys:', Object.keys(args));
     
     // Debug logging for design_pattern parameters
@@ -950,9 +970,11 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       gitUserName, 
       gitUserEmail, 
       supabaseUrl, 
+      supabaseAnonKey,
       supabaseServiceRoleKey,
       // Also try snake_case variants
       supabase_url,
+      supabase_anon_key,
       supabase_service_role_key,
       supabaseServiceKey,
       supabase_service_key,
@@ -982,6 +1004,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
     
     // Try both naming conventions for Supabase fields
     const finalSupabaseUrl = supabaseUrl || supabase_url;
+    const finalSupabaseAnonKey = supabaseAnonKey || supabase_anon_key;
     const finalSupabaseServiceRoleKey = supabaseServiceRoleKey || supabase_service_role_key || supabaseServiceKey || supabase_service_key;
     // Design pattern parameters (deprecated)
     const finalDesignPattern = design_pattern || designPattern;
@@ -1003,15 +1026,18 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       packageManager, 
       template, 
       gitRepository, 
-      gitHubToken, 
+      gitHubToken: maskSecret(gitHubToken), 
       gitUserName, 
       gitUserEmail, 
       supabaseUrl,
       supabase_url,
       finalSupabaseUrl,
-      supabaseServiceRoleKey,
-      supabase_service_role_key,
-      finalSupabaseServiceRoleKey,
+      supabaseAnonKey: maskSecret(supabaseAnonKey),
+      supabase_anon_key: maskSecret(supabase_anon_key),
+      finalSupabaseAnonKey: maskSecret(finalSupabaseAnonKey),
+      supabaseServiceRoleKey: maskSecret(supabaseServiceRoleKey),
+      supabase_service_role_key: maskSecret(supabase_service_role_key),
+      finalSupabaseServiceRoleKey: maskSecret(finalSupabaseServiceRoleKey),
       // Design pattern parameters (deprecated)
       design_pattern,
       designPattern,
@@ -1062,6 +1088,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       gitUserName: typeof gitUserName === 'string' ? gitUserName : undefined,
       gitUserEmail: typeof gitUserEmail === 'string' ? gitUserEmail : undefined,
       supabaseUrl: typeof finalSupabaseUrl === 'string' ? finalSupabaseUrl : undefined,
+      supabaseAnonKey: typeof finalSupabaseAnonKey === 'string' ? finalSupabaseAnonKey : undefined,
       supabaseServiceRoleKey: typeof finalSupabaseServiceRoleKey === 'string' ? finalSupabaseServiceRoleKey : undefined,
       // Design pattern parameters (deprecated)
       designPattern: typeof finalDesignPattern === 'string' ? finalDesignPattern : undefined,
@@ -1360,21 +1387,25 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       }
 
       // Create .env.local file with Supabase credentials if provided
-      if (config.supabaseUrl && config.supabaseServiceRoleKey) {
+      if (config.supabaseUrl && config.supabaseAnonKey) {
         let envContent: string;
         let envPath: string;
         
         if (config.framework === 'react-expo') {
           // Expo requires EXPO_PUBLIC_ prefix, but also support VITE_ for compatibility
-          envContent = `EXPO_PUBLIC_SUPABASE_URL=${config.supabaseUrl}\nEXPO_PUBLIC_SUPABASE_ANON_KEY=${config.supabaseServiceRoleKey}\nVITE_SUPABASE_URL=${config.supabaseUrl}\nVITE_SUPABASE_ANON_KEY=${config.supabaseServiceRoleKey}\n`;
+          envContent = `EXPO_PUBLIC_SUPABASE_URL=${config.supabaseUrl}\nEXPO_PUBLIC_SUPABASE_ANON_KEY=${config.supabaseAnonKey}\nVITE_SUPABASE_URL=${config.supabaseUrl}\nVITE_SUPABASE_ANON_KEY=${config.supabaseAnonKey}\n`;
           envPath = path.join(config.projectPath, '.env');
         } else {
-          envContent = `VITE_SUPABASE_URL=${config.supabaseUrl}\nVITE_SUPABASE_ANON_KEY=${config.supabaseServiceRoleKey}\n`;
+          envContent = `VITE_SUPABASE_URL=${config.supabaseUrl}\nVITE_SUPABASE_ANON_KEY=${config.supabaseAnonKey}\n`;
           envPath = path.join(config.projectPath, '.env.local');
         }
         
         await fs.writeFile(envPath, envContent, 'utf-8');
         console.log(`[MCP Server] ✅ Created ${path.basename(envPath)} with Supabase credentials`);
+      }
+
+      if (config.supabaseUrl && !config.supabaseAnonKey && config.supabaseServiceRoleKey) {
+        console.warn('[MCP Server] âš ï¸ Supabase anon key missing; skipping .env generation to avoid exposing service role key.');
       }
 
       // Create a basic README.md file to ensure the directory is properly initialized
@@ -5087,6 +5118,10 @@ module.exports = {
         createProjectFn,
         executePromptFn,
         githubAuth,
+        configOverrides: {
+          supabaseUrl,
+          supabaseAnonKey: anonKey,
+        },
       }).catch((err) => {
         console.error('[MCP Server] runBuildLoop error:', err);
       });
@@ -5237,7 +5272,26 @@ module.exports = {
         console.log('[MCP Server] Message level design_pattern_id:', (args as any).design_pattern_id);
         console.log('[MCP Server] Message level design_pattern_store:', (args as any).design_pattern_store);
         
-        console.log('[MCP Server] Tool call:', toolName, 'with args:', args);
+        const maskSecret = (value: unknown): unknown => {
+          if (typeof value !== 'string') return value;
+          if (value.length <= 8) return '***';
+          return `${value.slice(0, 4)}...${value.slice(-4)}`;
+        };
+        const REDACT_KEYS = new Set([
+          'supabaseAnonKey',
+          'supabase_anon_key',
+          'supabaseServiceRoleKey',
+          'supabase_service_role_key',
+          'supabaseServiceKey',
+          'supabase_service_key',
+          'accessToken',
+          'anonKey',
+          'gitHubToken',
+        ]);
+        const sanitizedToolArgs = Object.fromEntries(
+          Object.entries(args).map(([key, value]) => [key, REDACT_KEYS.has(key) ? maskSecret(value) : value])
+        );
+        console.log('[MCP Server] Tool call:', toolName, 'with args:', sanitizedToolArgs);
         
         // Validate arguments based on tool type
         let validatedArgs;
@@ -5401,11 +5455,3 @@ if (mode === 'cursor') {
   console.error('Starting MCP server in WebSocket mode...');
   server.runWebSocket().catch(console.error);
 }
-
-
-
-
-
-
-
-

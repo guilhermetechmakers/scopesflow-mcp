@@ -1,4 +1,3 @@
-import * as path from 'path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 /** Config passed to create-project (matches server CursorProjectConfig shape). */
@@ -13,6 +12,7 @@ export interface BuildCursorConfig {
   gitUserName?: string;
   gitUserEmail?: string;
   supabaseUrl?: string;
+  supabaseAnonKey?: string;
   supabaseServiceRoleKey?: string;
   designPattern?: string;
   designPatternSummary?: string;
@@ -50,6 +50,8 @@ export interface RunBuildLoopOptions {
   executePromptFn: ExecutePromptFn;
   /** Optional GitHub auth to merge into create/execute calls */
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
+  /** Optional overrides from start-build payload (not persisted) */
+  configOverrides?: Partial<BuildCursorConfig>;
 }
 
 /** Row from automated_builds (expected columns). */
@@ -76,10 +78,38 @@ export async function runBuildLoop(
   buildId: string,
   options: RunBuildLoopOptions
 ): Promise<void> {
-  const { createProjectFn, executePromptFn, githubAuth } = options;
+  const { createProjectFn, executePromptFn, githubAuth, configOverrides } = options;
 
   const log = (message: string, level: 'info' | 'error' = 'info') => {
     console.error(`[BuildRunner] ${message}`);
+  };
+
+  const maskSecret = (value: unknown): unknown => {
+    if (typeof value !== 'string') return value;
+    if (value.length <= 8) return '***';
+    return `${value.slice(0, 4)}...${value.slice(-4)}`;
+  };
+
+  const REDACT_KEYS = new Set([
+    'supabaseAnonKey',
+    'supabaseServiceRoleKey',
+    'supabaseServiceKey',
+    'supabase_service_role_key',
+    'supabase_service_key',
+    'supabase_anon_key',
+    'accessToken',
+    'anonKey',
+    'gitHubToken',
+  ]);
+
+  const sanitizeRecord = (input: unknown): unknown => {
+    if (!input || typeof input !== 'object') return input;
+    const record = input as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(record)) {
+      result[key] = REDACT_KEYS.has(key) ? maskSecret(value) : value;
+    }
+    return result;
   };
 
   const updateStatus = async (status: string, progress?: number) => {
@@ -144,9 +174,9 @@ export async function runBuildLoop(
     return;
   }
 
-  // Debug: log what we received from DB
-  console.error('[BuildRunner] Full configuration from DB:', JSON.stringify(configuration, null, 2));
-  console.error('[BuildRunner] cursorConfig from DB:', JSON.stringify(cursorConfig, null, 2));
+  // Debug: log what we received from DB (redacted)
+  console.error('[BuildRunner] Full configuration from DB:', JSON.stringify(sanitizeRecord(configuration), null, 2));
+  console.error('[BuildRunner] cursorConfig from DB:', JSON.stringify(sanitizeRecord(cursorConfig), null, 2));
 
   // Merge any top-level configuration fields into cursorConfig (in case ScopesFlow stores them there)
   const cursorConfigObj = cursorConfig as unknown as Record<string, unknown>;
@@ -161,11 +191,29 @@ export async function runBuildLoop(
   if (configObj.path && !mergedCursorConfig.projectPath && !mergedCursorConfig.path) mergedCursorConfig.projectPath = configObj.path;
   if (configObj.gitRepository && !mergedCursorConfig.gitRepository) mergedCursorConfig.gitRepository = configObj.gitRepository;
   if (configObj.supabaseUrl && !mergedCursorConfig.supabaseUrl) mergedCursorConfig.supabaseUrl = configObj.supabaseUrl;
+  if (configObj.supabase_url && !mergedCursorConfig.supabaseUrl) mergedCursorConfig.supabaseUrl = configObj.supabase_url;
+  if (configObj.supabase_anon_key && !mergedCursorConfig.supabaseAnonKey) mergedCursorConfig.supabaseAnonKey = configObj.supabase_anon_key;
   if (configObj.designReference && !mergedCursorConfig.designReference) mergedCursorConfig.designReference = configObj.designReference;
   if (configObj.designPatternId && !mergedCursorConfig.designPatternId) mergedCursorConfig.designPatternId = configObj.designPatternId;
+  if (mergedCursorConfig.supabase_url && !mergedCursorConfig.supabaseUrl) mergedCursorConfig.supabaseUrl = mergedCursorConfig.supabase_url;
+  if (mergedCursorConfig.supabase_anon_key && !mergedCursorConfig.supabaseAnonKey) mergedCursorConfig.supabaseAnonKey = mergedCursorConfig.supabase_anon_key;
+
+  if (configOverrides && typeof configOverrides === 'object') {
+    const overrideEntries = Object.entries(configOverrides).filter(([, value]) => value !== undefined);
+    if (overrideEntries.length > 0) {
+      for (const [key, value] of overrideEntries) {
+        mergedCursorConfig[key] = value as unknown;
+      }
+      console.error(
+        '[BuildRunner] Applied config overrides:',
+        JSON.stringify(sanitizeRecord(Object.fromEntries(overrideEntries)), null, 2)
+      );
+      await appendLog(`Merged start-build overrides into cursorConfig: ${overrideEntries.map(([key]) => key).join(', ')}`);
+    }
+  }
   
   // Debug: log merged config
-  console.error('[BuildRunner] Merged cursorConfig:', JSON.stringify(mergedCursorConfig, null, 2));
+  console.error('[BuildRunner] Merged cursorConfig:', JSON.stringify(sanitizeRecord(mergedCursorConfig), null, 2));
 
   let prompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
   if (prompts.length === 0) {
@@ -178,24 +226,57 @@ export async function runBuildLoop(
       prompts = promptRows.map((r: { prompt?: string; content?: string }) => (r.prompt ?? r.content ?? '')).filter(Boolean);
     }
   }
+  if (prompts.length === 0) {
+    const message = `No prompts found for build ${buildId}. Check automated_build_prompts and configuration.prompts.`;
+    log(message, 'error');
+    await appendLog(message, 'error');
+    await updateStatus('failed');
+    return;
+  }
+  await appendLog(`Loaded ${prompts.length} prompts`);
+
+  const hasString = (value: unknown): value is string =>
+    typeof value === 'string' && value.trim().length > 0;
+
+  const rawProjectName =
+    (mergedCursorConfig as { projectName?: unknown; name?: unknown }).projectName ??
+    (mergedCursorConfig as { projectName?: unknown; name?: unknown }).name;
+  const rawProjectPath =
+    (mergedCursorConfig as { projectPath?: unknown; path?: unknown }).projectPath ??
+    (mergedCursorConfig as { projectPath?: unknown; path?: unknown }).path;
+  const rawFramework = (mergedCursorConfig as { framework?: unknown }).framework;
+  const rawPackageManager = (mergedCursorConfig as { packageManager?: unknown }).packageManager;
+
+  const missingFields: string[] = [];
+  if (!hasString(rawProjectName)) missingFields.push('projectName');
+  if (!hasString(rawProjectPath)) missingFields.push('projectPath');
+  if (!hasString(rawFramework)) missingFields.push('framework');
+  if (!hasString(rawPackageManager)) missingFields.push('packageManager');
+  if (missingFields.length > 0) {
+    const message = `Missing required build configuration: ${missingFields.join(', ')}`;
+    log(message, 'error');
+    await appendLog(message, 'error');
+    await updateStatus('failed');
+    return;
+  }
+
+  const rawSupabaseUrl = (mergedCursorConfig as { supabaseUrl?: unknown }).supabaseUrl;
+  const rawSupabaseAnonKey = (mergedCursorConfig as { supabaseAnonKey?: unknown }).supabaseAnonKey;
+  if ((hasString(rawSupabaseUrl) && !hasString(rawSupabaseAnonKey)) || (!hasString(rawSupabaseUrl) && hasString(rawSupabaseAnonKey))) {
+    const message =
+      'Supabase configuration incomplete: both supabaseUrl and supabaseAnonKey are required for automated builds.';
+    log(message, 'error');
+    await appendLog(message, 'error');
+    await updateStatus('failed');
+    return;
+  }
 
   try {
     await updateStatus('running', 0);
     await appendLog('Build started');
 
-    const projectName =
-      (mergedCursorConfig as { projectName?: string; name?: string }).projectName ??
-      (mergedCursorConfig as { projectName?: string; name?: string }).name ??
-      'app';
-    const baseDir =
-      process.env.MCP_BUILD_PROJECTS_DIR || process.env.TMPDIR || process.cwd();
-    const rawPath =
-      (mergedCursorConfig as { projectPath?: string; path?: string }).projectPath ??
-      (mergedCursorConfig as { projectPath?: string; path?: string }).path;
-    const projectPath =
-      typeof rawPath === 'string' && rawPath.trim()
-        ? rawPath.trim()
-        : path.join(baseDir, 'builds', buildId, projectName);
+    const projectName = (rawProjectName as string).trim();
+    const projectPath = (rawProjectPath as string).trim();
 
     const createConfig: BuildCursorConfig = {
       ...(mergedCursorConfig as unknown as BuildCursorConfig),
