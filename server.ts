@@ -2456,18 +2456,38 @@ Analyze the existing project structure and implement the task following the patt
       await appendBuildLog('Prompt step completed successfully');
 
       // Insert mcp_log with mcp_type='completed' so UI can detect step completion and move to next prompt
+      console.log('[MCP Server] 🔍 DEBUG: About to insert mcp_log completed');
+      console.log('[MCP Server] 🔍 DEBUG: buildId=', args.buildId || 'MISSING');
+      console.log('[MCP Server] 🔍 DEBUG: hasSupabaseClient=', !!args.supabaseClient);
+      console.log('[MCP Server] 🔍 DEBUG: projectPath=', args.projectPath);
+      
       if (args.buildId && args.supabaseClient) {
         try {
-          await args.supabaseClient.from('build_logs').insert({
+          await appendBuildLog(`Inserting mcp_log completed: buildId=${args.buildId}, projectPath=${args.projectPath}`);
+          const insertResult = await args.supabaseClient.from('build_logs').insert({
             build_id: args.buildId,
             log_type: 'mcp_log',
             mcp_type: 'completed',
             message: 'Prompt step completed',
             created_at: new Date().toISOString(),
           });
+          
+          if (insertResult.error) {
+            console.error('[MCP Server] ❌ DEBUG: mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
+            await appendBuildLog(`mcp_log insert failed: ${insertResult.error.message}`, 'error');
+          } else {
+            console.log('[MCP Server] ✅ DEBUG: mcp_log insert succeeded (inner executePrompt block)');
+            await appendBuildLog('mcp_log completed inserted successfully (inner block)');
+          }
         } catch (e) {
-          console.warn('[MCP Server] Failed to insert completed mcp_log (non-blocking):', e instanceof Error ? e.message : e);
+          const errorMsg = e instanceof Error ? e.message : String(e);
+          console.error('[MCP Server] ❌ DEBUG: mcp_log insert exception:', errorMsg);
+          console.warn('[MCP Server] Failed to insert completed mcp_log (non-blocking):', errorMsg);
+          await appendBuildLog(`mcp_log insert exception: ${errorMsg}`, 'error');
         }
+      } else {
+        console.warn('[MCP Server] ⚠️ DEBUG: Skipping mcp_log insert - buildId or supabaseClient missing');
+        await appendBuildLog(`Skipping mcp_log insert: buildId=${!!args.buildId}, supabaseClient=${!!args.supabaseClient}`, 'error');
       }
 
       return {
@@ -5474,9 +5494,13 @@ module.exports = {
       // POST /api/execute-prompt
       if (req.method === 'POST' && (urlPath === '/api/execute-prompt' || urlPath === '/api/execute-prompt/')) {
         console.error('[MCP Server] POST /api/execute-prompt received');
+        console.log('[MCP Server] 🔍 DEBUG: HTTP request received - method=', req.method, 'urlPath=', urlPath, 'fullUrl=', url);
+        console.log('[MCP Server] 🔍 DEBUG: Request headers - user-agent=', req.headers['user-agent'], 'content-type=', req.headers['content-type']);
+        
         if (apiKey) {
           const headerKey = req.headers['x-api-key'];
           if (headerKey !== apiKey) {
+            console.warn('[MCP Server] ⚠️ DEBUG: API key mismatch');
             res.writeHead(401, { 'Content-Type': 'application/json', ...cors });
             res.end(JSON.stringify({ error: 'Unauthorized' }));
             return;
@@ -5486,11 +5510,16 @@ module.exports = {
         req.on('data', (chunk) => { body += chunk; });
         req.on('end', () => {
           try {
+            console.log('[MCP Server] 🔍 DEBUG: Parsing request body, length=', body.length);
             const data = JSON.parse(body || '{}') as {
               buildId?: string; projectId?: string; promptId?: string; promptContent?: string; projectPath?: string;
               timeout?: number; context?: string; supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
             };
             const { buildId, projectId, promptId, promptContent, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey } = data;
+            
+            console.log('[MCP Server] 🔍 DEBUG: Parsed request - buildId=', buildId, 'projectId=', projectId, 'projectPath=', projectPath);
+            console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasPromptContent=', !!promptContent, 'promptLength=', promptContent?.length || 0);
+            console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasSupabaseUrl=', !!supabaseUrl, 'hasServiceRoleKey=', !!serviceRoleKey, 'hasAnonKey=', !!anonKey, 'hasAccessToken=', !!accessToken);
             const hasServiceRole = !!serviceRoleKey;
             const hasUserAuth = !!anonKey && !!accessToken;
             if (!buildId || !projectId || !promptContent || !projectPath || !supabaseUrl || (!hasServiceRole && !hasUserAuth)) {
@@ -5501,28 +5530,58 @@ module.exports = {
             res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
             res.end(JSON.stringify({ scheduled: true }));
             setImmediate(async () => {
+              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Starting async executePrompt');
+              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - buildId=', buildId);
+              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - projectPath=', projectPath);
+              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - hasServiceRole=', hasServiceRole);
+              
               const supabase: SupabaseClient = hasServiceRole
                 ? createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } })
                 : createClient(supabaseUrl, anonKey as string, { global: { headers: { Authorization: `Bearer ${accessToken}` } } });
+              
               try {
+                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Calling executePrompt...');
                 const execRes = await this.executePrompt(this.validateExecutePromptArgs({
                   prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined,
                 }));
+                
+                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - executePrompt returned, parsing result...');
                 const execData = this.parseMcpResult(execRes);
                 const success = !!execData.success;
-                await supabase.from('build_logs').insert({
+                const resultSize = JSON.stringify(execRes).length;
+                
+                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - execData.success=', success);
+                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - execData.error=', execData.error || 'none');
+                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - result size=', resultSize, 'bytes');
+                
+                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Inserting mcp_log with mcp_type=', success ? 'completed' : 'failed');
+                const insertResult = await supabase.from('build_logs').insert({
                   build_id: buildId, log_type: 'mcp_log', mcp_type: success ? 'completed' : 'failed',
                   message: success ? 'Prompt execution completed' : (execData.error || 'Prompt execution failed'),
                   created_at: new Date().toISOString(),
                 });
+                
+                if (insertResult.error) {
+                  console.error('[MCP Server] ❌ DEBUG: HTTP handler mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
+                } else {
+                  console.log('[MCP Server] ✅ DEBUG: HTTP handler mcp_log insert succeeded (mcp_type=' + (success ? 'completed' : 'failed') + ')');
+                }
               } catch (error) {
+                console.error('[MCP Server] ❌ DEBUG: HTTP handler executePrompt exception:', error instanceof Error ? error.message : String(error));
                 try {
-                  await supabase.from('build_logs').insert({
+                  const errorInsertResult = await supabase.from('build_logs').insert({
                     build_id: buildId, log_type: 'mcp_log', mcp_type: 'failed',
                     message: error instanceof Error ? error.message : 'Prompt execution failed',
                     created_at: new Date().toISOString(),
                   });
-                } catch (_) {}
+                  if (errorInsertResult.error) {
+                    console.error('[MCP Server] ❌ DEBUG: HTTP handler error mcp_log insert also failed:', errorInsertResult.error.message);
+                  } else {
+                    console.log('[MCP Server] ✅ DEBUG: HTTP handler error mcp_log insert succeeded');
+                  }
+                } catch (insertError) {
+                  console.error('[MCP Server] ❌ DEBUG: HTTP handler error mcp_log insert exception:', insertError instanceof Error ? insertError.message : String(insertError));
+                }
               }
             });
           } catch (e) {

@@ -428,6 +428,14 @@ export async function runBuildLoop(
       const stepNum = i + 1;
       const preview = prompt.length > 60 ? `${prompt.substring(0, 60).replace(/\n/g, ' ')}...` : prompt.replace(/\n/g, ' ');
       await appendLog(`Running prompt ${stepNum}/${totalSteps}: ${preview}`);
+      
+      console.log(`[BuildRunner] 🔍 DEBUG: Starting prompt ${stepNum}/${totalSteps}`);
+      console.log(`[BuildRunner] 🔍 DEBUG: buildId=${buildId}`);
+      console.log(`[BuildRunner] 🔍 DEBUG: projectPath=${projectPath}`);
+      console.log(`[BuildRunner] 🔍 DEBUG: prompt preview=${preview}`);
+      console.log(`[BuildRunner] 🔍 DEBUG: hasSupabaseClient=${!!supabase}`);
+      console.log(`[BuildRunner] 🔍 DEBUG: userId=${row.user_id}`);
+      
       const executeArgs: BuildExecutePromptArgs = {
         prompt,
         projectPath,
@@ -448,7 +456,11 @@ export async function runBuildLoop(
       } else {
         console.warn(`[BuildRunner] ⚠️ No GitHub auth available to pass to executePrompt`);
       }
+      
+      console.log(`[BuildRunner] 🔍 DEBUG: Calling executePromptFn with buildId=${executeArgs.buildId}, hasSupabaseClient=${!!executeArgs.supabaseClient}`);
       await executePromptFn(executeArgs);
+      console.log(`[BuildRunner] 🔍 DEBUG: executePromptFn returned for prompt ${stepNum}/${totalSteps}`);
+      
       done++;
       await appendLog(`Prompt ${stepNum}/${totalSteps} completed`);
       const progress = Math.round((done / totalSteps) * 100);
