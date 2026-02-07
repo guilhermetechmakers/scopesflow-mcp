@@ -2090,13 +2090,24 @@ START IMPLEMENTING NOW. Do not ask questions - analyze the existing project and 
         
         // Read Design_reference.md from the project directory first, then fallback to MCP server directory
         let designReference: string | null = null;
+        const designRefPath = path.join(actualProjectPath, 'Design_reference.md');
+        
         try {
-          const designRefPath = path.join(actualProjectPath, 'Design_reference.md');
+          // Check if file exists first to avoid unnecessary error logs
+          await fs.access(designRefPath);
           designReference = await fs.readFile(designRefPath, 'utf-8');
+          console.log('[MCP Server] ✓ Loaded Design_reference.md from project directory');
         } catch (error) {
-          console.warn('[MCP Server] Could not read Design_reference.md from project, trying MCP server directory:', error);
-          // Fallback to MCP server directory
+          // File doesn't exist in project - this is expected, try fallback
+          console.log('[MCP Server] Design_reference.md not found in project, using MCP server boilerplate');
           designReference = await this.readBoilerplateFile('DESIGN_REFERENCE.md');
+          
+          // Only warn if fallback also fails
+          if (!designReference) {
+            console.warn('[MCP Server] ⚠️ Could not load Design_reference.md from project or MCP server directory');
+          } else {
+            console.log('[MCP Server] ✓ Loaded DESIGN_REFERENCE.md from MCP server boilerplate');
+          }
         }
         
         const successCriteria = await this.readBoilerplateFile('SUCCESS_CRITERIA.md');
