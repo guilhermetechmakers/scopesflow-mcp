@@ -45,6 +45,8 @@ export interface BuildExecutePromptArgs {
   userId?: string;
   /** When set, the MCP server can append to build_logs for this build in realtime. */
   buildId?: string;
+  /** Model to use for cursor-agent (defaults to "auto" if not provided). */
+  model?: string;
 }
 
 export type CreateProjectFn = (config: BuildCursorConfig) => Promise<unknown>;
@@ -289,6 +291,7 @@ export async function runBuildLoop(
   if (configObj.supabase_anon_key && !mergedCursorConfig.supabaseAnonKey) mergedCursorConfig.supabaseAnonKey = configObj.supabase_anon_key;
   if (configObj.designReference && !mergedCursorConfig.designReference) mergedCursorConfig.designReference = configObj.designReference;
   if (configObj.designPatternId && !mergedCursorConfig.designPatternId) mergedCursorConfig.designPatternId = configObj.designPatternId;
+  if (configObj.model && !mergedCursorConfig.model) mergedCursorConfig.model = configObj.model;
   if (mergedCursorConfig.supabase_url && !mergedCursorConfig.supabaseUrl) mergedCursorConfig.supabaseUrl = mergedCursorConfig.supabase_url;
   if (mergedCursorConfig.supabase_anon_key && !mergedCursorConfig.supabaseAnonKey) mergedCursorConfig.supabaseAnonKey = mergedCursorConfig.supabase_anon_key;
 
@@ -436,6 +439,10 @@ export async function runBuildLoop(
       console.log(`[BuildRunner] 🔍 DEBUG: hasSupabaseClient=${!!supabase}`);
       console.log(`[BuildRunner] 🔍 DEBUG: userId=${row.user_id}`);
       
+      // Extract model from configuration (can be at top level or in cursorConfig)
+      const rawModel = (mergedCursorConfig as { model?: unknown }).model ?? (configuration as { model?: unknown }).model;
+      const model = typeof rawModel === 'string' && rawModel.trim().length > 0 ? rawModel.trim() : undefined;
+      
       const executeArgs: BuildExecutePromptArgs = {
         prompt,
         projectPath,
@@ -445,6 +452,7 @@ export async function runBuildLoop(
         supabaseClient: supabase,
         userId: row.user_id,
         buildId,
+        model,
       };
       if (githubAuth) {
         if (githubAuth.gitHubToken) {
@@ -455,6 +463,9 @@ export async function runBuildLoop(
         if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
       } else {
         console.warn(`[BuildRunner] ⚠️ No GitHub auth available to pass to executePrompt`);
+      }
+      if (model) {
+        console.log(`[BuildRunner] ✅ Passing model to executePrompt: ${model}`);
       }
       
       console.log(`[BuildRunner] 🔍 DEBUG: Calling executePromptFn with buildId=${executeArgs.buildId}, hasSupabaseClient=${!!executeArgs.supabaseClient}`);
