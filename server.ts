@@ -2464,6 +2464,19 @@ Analyze the existing project structure and implement the task following the patt
       if (args.buildId && args.supabaseClient) {
         try {
           await appendBuildLog(`Inserting mcp_log completed: buildId=${args.buildId}, projectPath=${args.projectPath}`);
+          
+          // Try to refresh token if using user auth (not service role)
+          try {
+            const { data: { session } } = await args.supabaseClient.auth.getSession();
+            if (session && session.expires_at && session.expires_at * 1000 < Date.now() + 60000) {
+              console.log('[MCP Server] 🔄 DEBUG: Token expiring soon, refreshing before mcp_log insert...');
+              await args.supabaseClient.auth.refreshSession();
+              console.log('[MCP Server] ✅ DEBUG: Token refreshed successfully');
+            }
+          } catch (refreshError) {
+            console.warn('[MCP Server] ⚠️ DEBUG: Token refresh failed (non-blocking):', refreshError instanceof Error ? refreshError.message : String(refreshError));
+          }
+          
           const insertResult = await args.supabaseClient.from('build_logs').insert({
             build_id: args.buildId,
             log_type: 'mcp_log',
@@ -2474,7 +2487,10 @@ Analyze the existing project structure and implement the task following the patt
           
           if (insertResult.error) {
             console.error('[MCP Server] ❌ DEBUG: mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
-            await appendBuildLog(`mcp_log insert failed: ${insertResult.error.message}`, 'error');
+            await appendBuildLog(`mcp_log insert failed: ${insertResult.error.message} (code: ${insertResult.error.code})`, 'error');
+            
+            // Note: If JWT expired, the HTTP handler will retry with service role key
+            // This inner block can't access serviceRoleKey, so we rely on the HTTP handler fallback
           } else {
             console.log('[MCP Server] ✅ DEBUG: mcp_log insert succeeded (inner executePrompt block)');
             await appendBuildLog('mcp_log completed inserted successfully (inner block)');
@@ -5554,12 +5570,48 @@ module.exports = {
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - execData.error=', execData.error || 'none');
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - result size=', resultSize, 'bytes');
                 
+                // Try to refresh token before insert if using user auth
+                if (!hasServiceRole) {
+                  try {
+                    const { data: { session } } = await supabase.auth.getSession();
+                    if (session && session.expires_at && session.expires_at * 1000 < Date.now() + 60000) {
+                      console.log('[MCP Server] 🔄 DEBUG: HTTP handler - Token expiring soon, refreshing before mcp_log insert...');
+                      await supabase.auth.refreshSession();
+                      console.log('[MCP Server] ✅ DEBUG: HTTP handler - Token refreshed successfully');
+                    } else if (!session) {
+                      // Try refresh anyway for header-based auth
+                      try {
+                        await supabase.auth.refreshSession();
+                        console.log('[MCP Server] ✅ DEBUG: HTTP handler - Token refreshed (header-based auth)');
+                      } catch (refreshErr) {
+                        console.warn('[MCP Server] ⚠️ DEBUG: HTTP handler - Token refresh failed (non-blocking):', refreshErr instanceof Error ? refreshErr.message : String(refreshErr));
+                      }
+                    }
+                  } catch (refreshError) {
+                    console.warn('[MCP Server] ⚠️ DEBUG: HTTP handler - Token refresh check failed (non-blocking):', refreshError instanceof Error ? refreshError.message : String(refreshError));
+                  }
+                }
+                
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Inserting mcp_log with mcp_type=', success ? 'completed' : 'failed');
-                const insertResult = await supabase.from('build_logs').insert({
+                let insertResult = await supabase.from('build_logs').insert({
                   build_id: buildId, log_type: 'mcp_log', mcp_type: success ? 'completed' : 'failed',
                   message: success ? 'Prompt execution completed' : (execData.error || 'Prompt execution failed'),
                   created_at: new Date().toISOString(),
                 });
+                
+                // If JWT expired and we have service role key, retry with service role client
+                if (insertResult.error && insertResult.error.code === 'PGRST301' && hasServiceRole && serviceRoleKey) {
+                  console.log('[MCP Server] 🔄 DEBUG: HTTP handler - JWT expired, retrying with service role key...');
+                  const serviceRoleClient = createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } });
+                  insertResult = await serviceRoleClient.from('build_logs').insert({
+                    build_id: buildId, log_type: 'mcp_log', mcp_type: success ? 'completed' : 'failed',
+                    message: success ? 'Prompt execution completed' : (execData.error || 'Prompt execution failed'),
+                    created_at: new Date().toISOString(),
+                  });
+                  if (!insertResult.error) {
+                    console.log('[MCP Server] ✅ DEBUG: HTTP handler mcp_log insert succeeded with service role fallback (mcp_type=' + (success ? 'completed' : 'failed') + ')');
+                  }
+                }
                 
                 if (insertResult.error) {
                   console.error('[MCP Server] ❌ DEBUG: HTTP handler mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
@@ -5569,13 +5621,34 @@ module.exports = {
               } catch (error) {
                 console.error('[MCP Server] ❌ DEBUG: HTTP handler executePrompt exception:', error instanceof Error ? error.message : String(error));
                 try {
-                  const errorInsertResult = await supabase.from('build_logs').insert({
+                  // Try to refresh token before error insert if using user auth
+                  if (!hasServiceRole) {
+                    try {
+                      await supabase.auth.refreshSession();
+                    } catch (refreshErr) {
+                      // Ignore refresh errors
+                    }
+                  }
+                  
+                  let errorInsertResult = await supabase.from('build_logs').insert({
                     build_id: buildId, log_type: 'mcp_log', mcp_type: 'failed',
                     message: error instanceof Error ? error.message : 'Prompt execution failed',
                     created_at: new Date().toISOString(),
                   });
+                  
+                  // If JWT expired and we have service role key, retry with service role client
+                  if (errorInsertResult.error && errorInsertResult.error.code === 'PGRST301' && hasServiceRole && serviceRoleKey) {
+                    console.log('[MCP Server] 🔄 DEBUG: HTTP handler - JWT expired on error insert, retrying with service role key...');
+                    const serviceRoleClient = createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } });
+                    errorInsertResult = await serviceRoleClient.from('build_logs').insert({
+                      build_id: buildId, log_type: 'mcp_log', mcp_type: 'failed',
+                      message: error instanceof Error ? error.message : 'Prompt execution failed',
+                      created_at: new Date().toISOString(),
+                    });
+                  }
+                  
                   if (errorInsertResult.error) {
-                    console.error('[MCP Server] ❌ DEBUG: HTTP handler error mcp_log insert also failed:', errorInsertResult.error.message);
+                    console.error('[MCP Server] ❌ DEBUG: HTTP handler error mcp_log insert also failed:', errorInsertResult.error.message, errorInsertResult.error.code);
                   } else {
                     console.log('[MCP Server] ✅ DEBUG: HTTP handler error mcp_log insert succeeded');
                   }
