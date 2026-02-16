@@ -8,7 +8,9 @@ import * as http from 'http';
 import * as dotenv from 'dotenv';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { WebSocketServer } from 'ws';
-import { runBuildFromPayload, runBuildLoop } from './build-runner.js';
+import { runBuildFromPayload, runBuildLoop, type ActiveBuildEntry } from './build-runner.js';
+import { AppRunner } from './app-runner.js';
+import { BuildOrchestrator } from './build-orchestrator.js';
 
 // Load environment variables (optional now, not required for Cursor CLI)
 dotenv.config();
@@ -74,6 +76,35 @@ interface ProjectGitConfig {
   gitUserEmail?: string;
 }
 
+/** Disk space helper for /api/health. Works on Linux/macOS; returns null on Windows/error. */
+async function getDiskSpace(): Promise<{ freeGb: number; totalGb: number } | null> {
+  try {
+    if (process.platform === 'win32') {
+      const { stdout } = await execAsync('wmic logicaldisk where "DeviceID=\'C:\'" get FreeSpace,Size /format:csv');
+      const lines = stdout.trim().split('\n').filter(l => l.trim().length > 0);
+      const lastLine = lines[lines.length - 1];
+      const parts = lastLine.split(',').filter(p => p.trim().length > 0);
+      if (parts.length >= 2) {
+        const freeBytes = parseInt(parts[parts.length - 2], 10);
+        const totalBytes = parseInt(parts[parts.length - 1], 10);
+        return {
+          freeGb: Math.round((freeBytes / 1073741824) * 10) / 10,
+          totalGb: Math.round((totalBytes / 1073741824) * 10) / 10,
+        };
+      }
+      return null;
+    }
+    const { stdout } = await execAsync("df -BG --output=avail,size / | tail -1");
+    const parts = stdout.trim().split(/\s+/);
+    return {
+      freeGb: parseFloat(parts[0]),
+      totalGb: parseFloat(parts[1]),
+    };
+  } catch {
+    return null;
+  }
+}
+
 class CursorMCPServer {
   private server: Server;
   private wss: WebSocketServer | null = null;
@@ -88,6 +119,11 @@ class CursorMCPServer {
   private readonly MAX_BUILD_FIX_RETRIES = 10;
   private readonly BUILD_TIMEOUT = 120000; // 2 minutes
   private readonly DEV_SERVER_CHECK_TIMEOUT = 30000; // 30 seconds
+
+  // Dashboard support
+  private activeBuildTracker = new Map<string, ActiveBuildEntry>();
+  private appRunner = new AppRunner(process.env.MCP_SERVER_HOST || 'localhost');
+  private buildOrchestrator = new BuildOrchestrator();
 
   constructor() {
     this.server = new Server(
@@ -5365,6 +5401,7 @@ module.exports = {
         supabaseServiceRoleKey,
         createProjectFn,
         executePromptFn,
+        activeBuildTracker: this.activeBuildTracker,
       }).catch((err) => {
         console.error('[MCP Server] runBuildFromPayload error:', err);
       });
@@ -5382,12 +5419,12 @@ module.exports = {
     }
   }
 
-  /** CORS headers for /api/start-build (browser or Edge Function). */
+  /** CORS headers for API endpoints (browser or Edge Function). */
   private getBuildApiCorsHeaders(): Record<string, string> {
     return {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Content-Type': 'application/json',
     };
   }
@@ -5422,7 +5459,7 @@ module.exports = {
     });
     this.wss.on('error', (error) => console.error('WebSocket server error:', error));
 
-    this.httpServer = http.createServer((req, res) => {
+    this.httpServer = http.createServer(async (req, res) => {
       // Let upgrade handler take over for WebSocket
       if (req.headers.upgrade === 'websocket') {
         return;
@@ -5432,7 +5469,8 @@ module.exports = {
       console.error('[MCP Server] HTTP request:', req.method, urlPath, '(full:', url, ')');
       const cors = this.getBuildApiCorsHeaders();
 
-      if ((urlPath === '/api/create-project' || urlPath === '/api/create-project/' || urlPath === '/api/execute-prompt' || urlPath === '/api/execute-prompt/' || urlPath === '/api/start-build' || urlPath === '/api/start-build/') && req.method === 'OPTIONS') {
+      // Handle CORS preflight for all API routes
+      if (req.method === 'OPTIONS' && urlPath.startsWith('/api/')) {
         res.writeHead(200, cors);
         res.end();
         return;
@@ -5723,13 +5761,89 @@ module.exports = {
         return;
       }
 
+      // ──── GET /api/health ────
+      if (req.method === 'GET' && (urlPath === '/api/health' || urlPath === '/api/health/')) {
+        const health = {
+          status: 'ok',
+          uptime: process.uptime(),
+          activeBuilds: this.activeBuildTracker.size,
+          cursorAgentAvailable: this.cursorAgentAvailable,
+          memoryUsage: process.memoryUsage(),
+          diskSpace: await getDiskSpace(),
+          timestamp: new Date().toISOString(),
+        };
+        res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+        res.end(JSON.stringify(health));
+        return;
+      }
+
+      // ──── GET /api/builds ────
+      if (req.method === 'GET' && (urlPath === '/api/builds' || urlPath === '/api/builds/')) {
+        const builds = Array.from(this.activeBuildTracker.values());
+        res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+        res.end(JSON.stringify({
+          activeBuilds: builds,
+          maxConcurrent: 5,
+          available: Math.max(0, 5 - builds.length),
+        }));
+        return;
+      }
+
+      // ──── POST /api/builds/:id/preview ────
+      const previewStartMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/preview\/?$/);
+      if (req.method === 'POST' && previewStartMatch) {
+        const targetBuildId = previewStartMatch[1];
+        let body = '';
+        req.on('data', (chunk: Buffer) => { body += chunk; });
+        req.on('end', async () => {
+          try {
+            const buildInfo = this.activeBuildTracker.get(targetBuildId);
+            if (!buildInfo?.projectPath) {
+              res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: 'Build not found or no project path' }));
+              return;
+            }
+
+            const result = await this.appRunner.startPreview(targetBuildId, buildInfo.projectPath);
+            res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify(result));
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+          }
+        });
+        return;
+      }
+
+      // ──── DELETE /api/builds/:id/preview ────
+      const previewStopMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/preview\/?$/);
+      if (req.method === 'DELETE' && previewStopMatch) {
+        const targetBuildId = previewStopMatch[1];
+        try {
+          await this.appRunner.stopPreview(targetBuildId);
+          res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify({ stopped: true }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+        }
+        return;
+      }
+
       console.error('[MCP Server] 404 - No handler for:', req.method, urlPath, '(full:', url, ')');
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         error: 'Not found',
         method: req.method,
         url: urlPath,
-        availableEndpoints: ['/api/create-project', '/api/execute-prompt', '/api/start-build'],
+        availableEndpoints: [
+          '/api/create-project',
+          '/api/execute-prompt',
+          '/api/start-build',
+          '/api/health',
+          '/api/builds',
+          '/api/builds/:id/preview',
+        ],
       }));
     });
 
@@ -5742,9 +5856,13 @@ module.exports = {
     this.httpServer.listen(port, host, () => {
       console.error(`ScopesFlow Cursor MCP Server running on http://${host}:${port}`);
       console.error(`HTTP endpoints:`);
-      console.error(`  POST http://${host}:${port}/api/create-project`);
-      console.error(`  POST http://${host}:${port}/api/execute-prompt`);
-      console.error(`  POST http://${host}:${port}/api/start-build`);
+      console.error(`  POST   http://${host}:${port}/api/create-project`);
+      console.error(`  POST   http://${host}:${port}/api/execute-prompt`);
+      console.error(`  POST   http://${host}:${port}/api/start-build`);
+      console.error(`  GET    http://${host}:${port}/api/health`);
+      console.error(`  GET    http://${host}:${port}/api/builds`);
+      console.error(`  POST   http://${host}:${port}/api/builds/:id/preview`);
+      console.error(`  DELETE http://${host}:${port}/api/builds/:id/preview`);
     });
   }
 

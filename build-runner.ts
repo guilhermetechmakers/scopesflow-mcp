@@ -52,6 +52,39 @@ export interface BuildExecutePromptArgs {
 export type CreateProjectFn = (config: BuildCursorConfig) => Promise<unknown>;
 export type ExecutePromptFn = (args: BuildExecutePromptArgs) => Promise<unknown>;
 
+/** Parsed result from executePromptFn (extracted from MCP content[0].text). */
+export interface ExecutePromptResult {
+  success: boolean;
+  error?: string | null;
+  output?: string;
+  filesChanged?: string[];
+  timeElapsed?: number;
+  hasMigrations?: boolean;
+  migrations?: Array<{ filename: string; description: string; sql: string }>;
+}
+
+/** Item in the prompt execution queue. */
+export interface PromptQueueItem {
+  id: string;
+  prompt_content: string;
+  title?: string;
+  source: 'sequence' | 'generated' | 'custom';
+  type: string;
+}
+
+/** Active build tracker entry shared with server.ts. */
+export interface ActiveBuildEntry {
+  buildId: string;
+  projectId: string;
+  projectName: string;
+  startedAt: string;
+  currentStep: number;
+  totalSteps: number;
+  status: string;
+  projectPath: string;
+  previewPort?: number;
+}
+
 export interface RunBuildLoopOptions {
   createProjectFn: CreateProjectFn;
   executePromptFn: ExecutePromptFn;
@@ -59,6 +92,8 @@ export interface RunBuildLoopOptions {
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   /** Optional overrides from start-build payload (not persisted) */
   configOverrides?: Partial<BuildCursorConfig>;
+  /** Shared in-memory build tracker (updated by the loop, read by HTTP endpoints). */
+  activeBuildTracker?: Map<string, ActiveBuildEntry>;
 }
 
 export interface RunBuildFromPayloadOptions {
@@ -70,6 +105,8 @@ export interface RunBuildFromPayloadOptions {
   supabaseServiceRoleKey?: string;
   createProjectFn: CreateProjectFn;
   executePromptFn: ExecutePromptFn;
+  /** Shared in-memory build tracker (updated by the loop, read by HTTP endpoints). */
+  activeBuildTracker?: Map<string, ActiveBuildEntry>;
 }
 
 /** Row from automated_builds (expected columns). */
@@ -96,7 +133,19 @@ export async function runBuildLoop(
   buildId: string,
   options: RunBuildLoopOptions
 ): Promise<void> {
-  const { createProjectFn, executePromptFn, githubAuth, configOverrides } = options;
+  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker } = options;
+
+  /** Parse MCP tool result (content[0].text) to extract typed JSON. */
+  const parseMcpResult = (res: unknown): ExecutePromptResult => {
+    try {
+      const r = res as { content?: Array<{ type?: string; text?: string }> };
+      const text = r?.content?.[0]?.text;
+      if (!text) return { success: false, error: 'No result content' };
+      return JSON.parse(text) as ExecutePromptResult;
+    } catch {
+      return { success: false, error: 'Failed to parse execute result' };
+    }
+  };
 
   const log = (message: string, level: 'info' | 'error' = 'info') => {
     console.error(`[BuildRunner] ${message}`);
@@ -312,9 +361,23 @@ export async function runBuildLoop(
   // Debug: log merged config
   console.error('[BuildRunner] Merged cursorConfig:', JSON.stringify(sanitizeRecord(mergedCursorConfig), null, 2));
 
-  let prompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
-  let promptSource: string | undefined = prompts.length > 0 ? 'configuration.prompts' : undefined;
-  if (prompts.length === 0) {
+  // Build prompt queue as typed objects
+  let promptQueue: PromptQueueItem[] = [];
+  let promptSource: string | undefined;
+
+  const rawPrompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
+  if (rawPrompts.length > 0) {
+    promptSource = 'configuration.prompts';
+    promptQueue = rawPrompts.map((text, idx) => ({
+      id: `cfg-${idx}`,
+      prompt_content: text,
+      title: text.length > 60 ? `${text.substring(0, 60)}...` : text,
+      source: 'sequence' as const,
+      type: 'prompt',
+    }));
+  }
+
+  if (promptQueue.length === 0) {
     const projectId =
       (configuration as { projectId?: string; project_id?: string }).projectId ??
       (configuration as { projectId?: string; project_id?: string }).project_id;
@@ -325,7 +388,7 @@ export async function runBuildLoop(
         
         const { data: flowchartRows, error: flowchartError } = await supabase
           .from('flowchart_items')
-          .select('prompt, prompt_content, sequence_order')
+          .select('id, prompt, prompt_content, sequence_order')
           .eq('project_id', projectId)
           .eq('type', 'prompt')
           .order('sequence_order', { ascending: true });
@@ -334,10 +397,19 @@ export async function runBuildLoop(
           await appendLog(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
         }
         if (Array.isArray(flowchartRows)) {
-          prompts = flowchartRows
-            .map((r: { prompt?: string; prompt_content?: string }) => (r.prompt_content ?? r.prompt ?? ''))
-            .filter(Boolean);
-          if (prompts.length > 0) promptSource = 'flowchart_items';
+          const mapped = flowchartRows
+            .filter((r: { prompt?: string; prompt_content?: string }) => (r.prompt_content ?? r.prompt ?? '').length > 0)
+            .map((r: { id: string; prompt?: string; prompt_content?: string }) => ({
+              id: r.id,
+              prompt_content: (r.prompt_content ?? r.prompt ?? ''),
+              title: (r.prompt_content ?? r.prompt ?? '').substring(0, 60),
+              source: 'sequence' as const,
+              type: 'prompt',
+            }));
+          if (mapped.length > 0) {
+            promptQueue = mapped;
+            promptSource = 'flowchart_items';
+          }
         }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Unknown error';
@@ -346,14 +418,14 @@ export async function runBuildLoop(
       }
     }
   }
-  if (prompts.length === 0) {
+  if (promptQueue.length === 0) {
     const message = `No prompts found for build ${buildId}. Checked configuration.prompts and flowchart_items.`;
     log(message, 'error');
     await appendLog(message, 'error');
     await updateStatus('failed');
     return;
   }
-  await appendLog(`Loaded ${prompts.length} prompts from ${promptSource ?? 'unknown source'}`);
+  await appendLog(`Loaded ${promptQueue.length} prompts from ${promptSource ?? 'unknown source'}`);
 
   const hasString = (value: unknown): value is string =>
     typeof value === 'string' && value.trim().length > 0;
@@ -392,6 +464,10 @@ export async function runBuildLoop(
     return;
   }
 
+  // ──── HEARTBEAT ────
+  const HEARTBEAT_INTERVAL_MS = 15_000;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
   try {
     await updateStatus('running', 0);
     await appendLog('Build started');
@@ -421,70 +497,251 @@ export async function runBuildLoop(
     await createProjectFn(createConfig);
     await appendLog('Project created');
 
-    const totalSteps = prompts.length || 1;
-    let done = 0;
+    // Start heartbeat (dashboard watches last_heartbeat to detect stale builds)
+    heartbeatTimer = setInterval(async () => {
+      try {
+        await supabase.from('automated_builds').update({
+          last_heartbeat: new Date().toISOString(),
+        }).eq('id', buildId);
+      } catch (err) {
+        console.error('[Build Runner] Heartbeat failed:', err);
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    let totalSteps = promptQueue.length || 1;
+    let currentStep = 0;
+
+    // Derive projectId for tracker
+    const projectId =
+      (configuration as { projectId?: string; project_id?: string }).projectId ??
+      (configuration as { projectId?: string; project_id?: string }).project_id ?? '';
+
+    // Extract model from configuration (can be at top level or in cursorConfig)
+    const rawModel = (mergedCursorConfig as { model?: unknown }).model ?? (configuration as { model?: unknown }).model;
+    const model = typeof rawModel === 'string' && rawModel.trim().length > 0 ? rawModel.trim() : undefined;
+
+    // Timeout per step from automationSettings or default 5 min
+    const timeoutPerStep =
+      ((configuration as { automationSettings?: { timeoutPerStep?: number } }).automationSettings?.timeoutPerStep) ?? 300000;
 
     await appendLog(`Starting prompt execution (${totalSteps} prompt${totalSteps === 1 ? '' : 's'})`);
 
-    for (let i = 0; i < prompts.length; i++) {
-      const prompt = prompts[i];
-      const stepNum = i + 1;
-      const preview = prompt.length > 60 ? `${prompt.substring(0, 60).replace(/\n/g, ' ')}...` : prompt.replace(/\n/g, ' ');
-      await appendLog(`Running prompt ${stepNum}/${totalSteps}: ${preview}`);
-      
-      console.log(`[BuildRunner] 🔍 DEBUG: Starting prompt ${stepNum}/${totalSteps}`);
-      console.log(`[BuildRunner] 🔍 DEBUG: buildId=${buildId}`);
-      console.log(`[BuildRunner] 🔍 DEBUG: projectPath=${projectPath}`);
-      console.log(`[BuildRunner] 🔍 DEBUG: prompt preview=${preview}`);
-      console.log(`[BuildRunner] 🔍 DEBUG: hasSupabaseClient=${!!supabase}`);
-      console.log(`[BuildRunner] 🔍 DEBUG: userId=${row.user_id}`);
-      
-      // Extract model from configuration (can be at top level or in cursorConfig)
-      const rawModel = (mergedCursorConfig as { model?: unknown }).model ?? (configuration as { model?: unknown }).model;
-      const model = typeof rawModel === 'string' && rawModel.trim().length > 0 ? rawModel.trim() : undefined;
-      
-      const executeArgs: BuildExecutePromptArgs = {
-        prompt,
-        projectPath,
-        isFirstPrompt: i === 0,
-        retryCount: 0,
-        isRetry: false,
-        supabaseClient: supabase,
-        userId: row.user_id,
-        buildId,
-        model,
-      };
-      if (githubAuth) {
-        if (githubAuth.gitHubToken) {
-          executeArgs.gitHubToken = githubAuth.gitHubToken;
-          console.log(`[BuildRunner] ✅ Passing GitHub token to executePrompt (token: ${githubAuth.gitHubToken.slice(0, 4)}...)`);
+    let isFirstPrompt = true;
+
+    while (promptQueue.length > 0) {
+      // ──── Check for custom prompts ────
+      try {
+        const { data: customPrompts } = await supabase
+          .from('build_custom_prompts')
+          .select('*')
+          .eq('build_id', buildId)
+          .eq('status', 'pending')
+          .order('created_at');
+
+        if (customPrompts && customPrompts.length > 0) {
+          const customPrompt = customPrompts[0];
+
+          // Mark as executing
+          await supabase.from('build_custom_prompts')
+            .update({ status: 'executing', executed_at: new Date().toISOString() })
+            .eq('id', customPrompt.id);
+
+          await appendLog(
+            `Executing custom prompt: ${customPrompt.prompt_title ?? customPrompt.prompt_content.substring(0, 50)}...`
+          );
+
+          // Build synthetic queue item
+          const syntheticItem: PromptQueueItem = {
+            id: customPrompt.id,
+            prompt_content: customPrompt.prompt_content,
+            title: customPrompt.prompt_title ?? 'Custom Prompt',
+            source: 'custom',
+            type: 'prompt',
+          };
+
+          // Position: 'next' = front of queue, anything else = back
+          if (customPrompt.position === 'next') {
+            promptQueue.unshift(syntheticItem);
+          } else {
+            promptQueue.push(syntheticItem);
+          }
+          totalSteps += 1;
         }
-        if (githubAuth.gitUserName) executeArgs.gitUserName = githubAuth.gitUserName;
-        if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
-      } else {
-        console.warn(`[BuildRunner] ⚠️ No GitHub auth available to pass to executePrompt`);
+      } catch (err) {
+        console.error('[Build Runner] Custom prompt check failed (non-blocking):', err);
       }
-      if (model) {
-        console.log(`[BuildRunner] ✅ Passing model to executePrompt: ${model}`);
+
+      const promptItem = promptQueue.shift()!;
+      currentStep++;
+      const promptContent = promptItem.prompt_content;
+      const preview = promptContent.length > 60
+        ? `${promptContent.substring(0, 60).replace(/\n/g, ' ')}...`
+        : promptContent.replace(/\n/g, ' ');
+      await appendLog(`Running prompt ${currentStep}/${totalSteps}: ${preview}`);
+
+      console.log(`[BuildRunner] Starting prompt ${currentStep}/${totalSteps}`);
+      console.log(`[BuildRunner] buildId=${buildId}, projectPath=${projectPath}`);
+
+      // ──── Record step start in build_steps ────
+      const stepStartMs = Date.now();
+      const stepStartTime = new Date().toISOString();
+
+      let stepRowId: string | null = null;
+      try {
+        const { data: stepRow } = await supabase.from('build_steps').insert({
+          build_id: buildId,
+          step_number: currentStep,
+          prompt_id: promptItem.id,
+          prompt_content: promptContent,
+          prompt_source: promptItem.source,
+          status: 'running',
+          started_at: stepStartTime,
+          retry_count: 0,
+        }).select().single();
+        stepRowId = stepRow?.id ?? null;
+      } catch (err) {
+        console.error('[Build Runner] Failed to insert build_steps row (non-blocking):', err);
       }
-      
-      console.log(`[BuildRunner] 🔍 DEBUG: Calling executePromptFn with buildId=${executeArgs.buildId}, hasSupabaseClient=${!!executeArgs.supabaseClient}`);
-      await executePromptFn(executeArgs);
-      console.log(`[BuildRunner] 🔍 DEBUG: executePromptFn returned for prompt ${stepNum}/${totalSteps}`);
-      
-      done++;
-      await appendLog(`Prompt ${stepNum}/${totalSteps} completed`);
-      const progress = Math.round((done / totalSteps) * 100);
+
+      // ──── Execute with retry ────
+      const MAX_STEP_RETRIES = 2;
+      let retryCount = 0;
+      let execResult: ExecutePromptResult = { success: false, error: 'Not executed' };
+
+      while (retryCount <= MAX_STEP_RETRIES) {
+        const executeArgs: BuildExecutePromptArgs = {
+          prompt: promptContent,
+          projectPath,
+          timeout: timeoutPerStep,
+          context: `Step ${currentStep} of automated build`,
+          isFirstPrompt,
+          retryCount,
+          isRetry: retryCount > 0,
+          supabaseClient: supabase,
+          userId: row.user_id,
+          buildId,
+          model,
+        };
+        if (githubAuth) {
+          if (githubAuth.gitHubToken) {
+            executeArgs.gitHubToken = githubAuth.gitHubToken;
+          }
+          if (githubAuth.gitUserName) executeArgs.gitUserName = githubAuth.gitUserName;
+          if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
+        }
+
+        const rawResult = await executePromptFn(executeArgs);
+        execResult = parseMcpResult(rawResult);
+
+        if (execResult.success) break;
+
+        retryCount++;
+        if (retryCount > MAX_STEP_RETRIES) {
+          await appendLog(
+            `Step ${currentStep} permanently failed after ${MAX_STEP_RETRIES + 1} attempts.`,
+            'error'
+          );
+          break;
+        }
+
+        await appendLog(
+          `Step ${currentStep} failed (attempt ${retryCount}/${MAX_STEP_RETRIES + 1}): ${execResult.error}`,
+          'error'
+        );
+
+        // Update step to 'retrying'
+        if (stepRowId) {
+          try {
+            await supabase.from('build_steps').update({
+              status: 'retrying',
+              retry_count: retryCount,
+              error_message: execResult.error ?? null,
+            }).eq('id', stepRowId);
+          } catch { /* non-blocking */ }
+        }
+
+        // Exponential backoff
+        await new Promise(r => setTimeout(r, 5000 * retryCount));
+      }
+
+      // ──── Update step row with final result ────
+      const stepStatus = execResult.success ? 'completed' : 'failed';
+
+      if (stepRowId) {
+        try {
+          await supabase.from('build_steps').update({
+            status: stepStatus,
+            completed_at: new Date().toISOString(),
+            duration_ms: Date.now() - stepStartMs,
+            files_changed: execResult.filesChanged ?? [],
+            error_message: execResult.error ?? null,
+            retry_count: retryCount,
+            has_migrations: execResult.hasMigrations ?? false,
+            migrations: execResult.migrations ?? [],
+          }).eq('id', stepRowId);
+        } catch (err) {
+          console.error('[Build Runner] Failed to update build_steps row (non-blocking):', err);
+        }
+      }
+
+      // ──── Update custom prompt status ────
+      if (promptItem.source === 'custom') {
+        try {
+          await supabase.from('build_custom_prompts')
+            .update({
+              status: execResult.success ? 'completed' : 'failed',
+              step_id: stepRowId ?? null,
+            })
+            .eq('id', promptItem.id);
+        } catch { /* non-blocking */ }
+      }
+
+      if (!execResult.success) {
+        await appendLog(
+          `Skipping failed step ${currentStep}, continuing with next prompt`,
+          'error'
+        );
+      }
+
+      isFirstPrompt = false;
+      await appendLog(`Prompt ${currentStep}/${totalSteps} ${stepStatus}`);
+      const progress = Math.round((currentStep / totalSteps) * 100);
       await updateStatus('running', progress);
+
+      // ──── Update active build tracker ────
+      if (activeBuildTracker) {
+        activeBuildTracker.set(buildId, {
+          buildId,
+          projectId,
+          projectName,
+          startedAt: stepStartTime,
+          currentStep,
+          totalSteps,
+          status: 'running',
+          projectPath,
+        });
+      }
     }
 
     await updateStatus('completed', 100);
     await appendLog('Build completed successfully');
+
+    // Clean up tracker
+    if (activeBuildTracker) {
+      activeBuildTracker.delete(buildId);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`Build failed: ${message}`, 'error');
     await appendLog(`Build failed: ${message}`, 'error');
     await updateStatus('failed');
+    if (activeBuildTracker) {
+      activeBuildTracker.delete(buildId);
+    }
+  } finally {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+    }
   }
 }
 
@@ -493,7 +750,7 @@ export async function runBuildLoop(
  * then run the build loop with config overrides.
  */
 export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): Promise<void> {
-  const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, createProjectFn, executePromptFn } = options;
+  const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, createProjectFn, executePromptFn, activeBuildTracker } = options;
 
   const supabaseUser: SupabaseClient = createClient(supabaseUrl, anonKey, {
     global: { headers: { Authorization: `Bearer ${accessToken}` } },
@@ -576,5 +833,6 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
       supabaseUrl,
       supabaseAnonKey: anonKey,
     },
+    activeBuildTracker,
   });
 }
