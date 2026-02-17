@@ -48,6 +48,8 @@ export interface BuildExecutePromptArgs {
   buildId?: string;
   /** Model to use for cursor-agent (defaults to "auto" if not provided). */
   model?: string;
+  /** Per-user Cursor API key (passed to cursor-agent via CURSOR_API_KEY env var). */
+  cursorApiKey?: string;
 }
 
 export type CreateProjectFn = (config: BuildCursorConfig) => Promise<unknown>;
@@ -95,6 +97,8 @@ export interface RunBuildLoopOptions {
   configOverrides?: Partial<BuildCursorConfig>;
   /** Shared in-memory build tracker (updated by the loop, read by HTTP endpoints). */
   activeBuildTracker?: Map<string, ActiveBuildEntry>;
+  /** Per-user Cursor API key (fetched once at build start, passed to every prompt execution). */
+  cursorApiKey?: string;
 }
 
 export interface RunBuildFromPayloadOptions {
@@ -138,7 +142,7 @@ export async function runBuildLoop(
   buildId: string,
   options: RunBuildLoopOptions
 ): Promise<void> {
-  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker } = options;
+  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker, cursorApiKey } = options;
 
   /** Parse MCP tool result (content[0].text) to extract typed JSON. */
   const parseMcpResult = (res: unknown): ExecutePromptResult => {
@@ -172,6 +176,7 @@ export async function runBuildLoop(
     'accessToken',
     'anonKey',
     'gitHubToken',
+    'cursorApiKey',
   ]);
 
   const sanitizeRecord = (input: unknown): unknown => {
@@ -656,6 +661,7 @@ export async function runBuildLoop(
           userId: row.user_id,
           buildId,
           model,
+          cursorApiKey,
         };
         if (githubAuth) {
           if (githubAuth.gitHubToken) {
@@ -860,6 +866,60 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
     console.log('[BuildRunner] ✅ Using service role key for build DB operations (JWT expiry safe)');
   }
 
+  // ──── Fetch Cursor API key once per build (per-user quota isolation) ────
+  let cursorApiKey: string | undefined;
+  try {
+    const dbClient = supabaseServiceRoleKey
+      ? createClient(supabaseUrl, supabaseServiceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
+      : supabaseUser;
+    console.log(`[BuildRunner] 🔍 Fetching Cursor API key for user_id: ${user.id}`);
+    const { data: keyRow, error: keyError } = await dbClient
+      .from('cursor_api_keys')
+      .select('api_key_ciphertext, revoked_at')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (keyError) {
+      console.warn(`[BuildRunner] ⚠️ Error fetching Cursor API key: ${keyError.message}`);
+    } else if (keyRow && typeof keyRow === 'object') {
+      const row = keyRow as { api_key_ciphertext?: string; revoked_at?: string | null };
+      if (row.revoked_at) {
+        console.warn('[BuildRunner] ⚠️ Cursor API key has been revoked');
+      } else if (row.api_key_ciphertext) {
+        // NOTE: If using server-side encryption, decrypt here using CURSOR_KEYS_ENCRYPTION_SECRET.
+        // For now, we assume the ciphertext is the plaintext key (or decrypt with your chosen method).
+        cursorApiKey = row.api_key_ciphertext;
+        console.log('[BuildRunner] ✅ Cursor API key loaded for user');
+
+        // Update last_used_at
+        try {
+          await dbClient.from('cursor_api_keys').update({ last_used_at: new Date().toISOString() }).eq('user_id', user.id);
+        } catch { /* non-blocking */ }
+      } else {
+        console.warn('[BuildRunner] ⚠️ Cursor API key row found but api_key_ciphertext is empty');
+      }
+    } else {
+      console.warn(`[BuildRunner] ⚠️ No Cursor API key found for user_id: ${user.id}`);
+    }
+  } catch (error) {
+    console.warn('[BuildRunner] ⚠️ Exception fetching Cursor API key:', error instanceof Error ? error.message : 'Unknown error');
+  }
+
+  // If no key and enforcement is enabled, fail the build early
+  if (!cursorApiKey && process.env.MCP_REQUIRE_CURSOR_API_KEY === 'true') {
+    console.error('[BuildRunner] Cursor API key not configured for this user. Build cannot proceed.');
+    try {
+      await supabaseForBuild.from('automated_builds').update({ status: 'failed', updated_at: new Date().toISOString() }).eq('id', buildId);
+      await supabaseForBuild.from('build_logs').insert({
+        build_id: buildId,
+        log_type: 'build_log',
+        message: 'Cursor API key not configured for this user. Please add your API key in Settings.',
+        created_at: new Date().toISOString(),
+      });
+    } catch { /* non-blocking */ }
+    return;
+  }
+
   await runBuildLoop(supabaseForBuild, buildId, {
     createProjectFn,
     executePromptFn,
@@ -869,5 +929,6 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
       supabaseAnonKey: anonKey,
     },
     activeBuildTracker,
+    cursorApiKey,
   });
 }

@@ -10,7 +10,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { WebSocketServer } from 'ws';
 import { runBuildFromPayload, runBuildLoop, type ActiveBuildEntry } from './build-runner.js';
 import { AppRunner } from './app-runner.js';
-import { BuildOrchestrator } from './build-orchestrator.js';
+import { BuildOrchestrator, type WorkerSession } from './build-orchestrator.js';
 
 // Load environment variables (optional now, not required for Cursor CLI)
 dotenv.config();
@@ -59,6 +59,7 @@ interface ExecutePromptArgs {
   userId?: string;           // NEW: Optional user ID for fetching GitHub auth
   buildId?: string;          // NEW: When set, server appends to build_logs for realtime following
   model?: string;            // NEW: Model to use for cursor-agent (defaults to "auto")
+  cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
 }
 interface ProjectPathArgs {
   projectPath: string;
@@ -970,6 +971,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       'supabaseServiceKey',
       'supabase_service_key',
       'gitHubToken',
+      'cursorApiKey',
     ]);
     const sanitizedArgs = Object.fromEntries(
       Object.entries(args).map(([key, value]) => [key, REDACT_KEYS.has(key) ? maskSecret(value) : value])
@@ -2289,7 +2291,8 @@ Analyze the existing project structure and implement the task following the patt
           command,
           isWindows ? undefined : actualProjectPath,
           args.timeout || 300000, // 5 minute default
-          onBuildLog
+          onBuildLog,
+          args.cursorApiKey,
         );
         stdout = result.stdout;
         stderr = result.stderr;
@@ -3502,7 +3505,8 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     command: string,
     cwd: string | undefined,
     timeout: number,
-    onBuildLog?: (message: string, level?: 'info' | 'error') => void | Promise<void>
+    onBuildLog?: (message: string, level?: 'info' | 'error') => void | Promise<void>,
+    cursorApiKey?: string,
   ): Promise<{ stdout: string; stderr: string; logs: Array<{ timestamp: string; type: string; message: string; data?: any }> }> {
     return new Promise((resolve, reject) => {
       let stdout = '';
@@ -3530,11 +3534,17 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       console.log('[MCP Server] Starting cursor-agent with streaming output...');
       addLog('info', 'Starting cursor-agent with streaming output');
       
+      // Build env with optional per-user Cursor API key
+      const spawnEnv = cursorApiKey
+        ? { ...process.env, CURSOR_API_KEY: cursorApiKey }
+        : process.env;
+
       // Spawn the process (empty args array to avoid DEP0190 deprecation with shell: true)
       const childProcess = spawn(command, [], {
         cwd,
         shell: true,
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: spawnEnv,
       });
       
       // Set up timeout
@@ -5407,6 +5417,9 @@ module.exports = {
   /**
    * Real runBuild: validate user, load build row and config, optionally load GitHub auth,
    * then start the build loop in the background and return so the HTTP handler can send 200.
+   *
+   * When MCP_USE_BUILD_WORKERS=true, spawns an isolated worker process per build.
+   * Otherwise, falls back to running the build in-process (legacy behaviour).
    */
   private async runBuild(
     buildId: string,
@@ -5414,15 +5427,20 @@ module.exports = {
     accessToken: string,
     anonKey: string,
     supabaseServiceRoleKey?: string
-  ): Promise<void> {
+  ): Promise<{ sessionPid?: number }> {
+    const useWorkers = process.env.MCP_USE_BUILD_WORKERS === 'true';
+
+    if (useWorkers) {
+      return this.runBuildWorker(buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey);
+    }
+
+    // ──── Legacy in-process mode ────
     const createProjectFn = (config: unknown) => {
       const c = config as Record<string, unknown>;
-      // Pass through all fields from config, ensure name/path exist for validateCreateProjectArgs
-      // (validateCreateProjectArgs expects 'name' and 'path', but config may have 'projectName'/'projectPath')
       const args = {
-        ...c, // Spread all original fields first (preserves everything)
-        name: c.projectName ?? c.name, // Map projectName -> name for validation
-        path: c.projectPath ?? c.path,   // Map projectPath -> path for validation
+        ...c,
+        name: c.projectName ?? c.name,
+        path: c.projectPath ?? c.path,
       };
       return this.createProject(this.validateCreateProjectArgs(args));
     };
@@ -5443,6 +5461,98 @@ module.exports = {
         console.error('[MCP Server] runBuildFromPayload error:', err);
       });
     });
+
+    return {};
+  }
+
+  /**
+   * Spawn an isolated worker process for a single build.
+   * The worker runs build-worker.ts via tsx and communicates with the
+   * dispatcher's HTTP endpoints for create-project / execute-prompt.
+   */
+  private async runBuildWorker(
+    buildId: string,
+    supabaseUrl: string,
+    accessToken: string,
+    anonKey: string,
+    supabaseServiceRoleKey?: string,
+  ): Promise<{ sessionPid?: number }> {
+    // Concurrency check
+    if (!this.buildOrchestrator.canStartBuild()) {
+      throw new Error('Max concurrent builds reached. Try again later.');
+    }
+
+    // Ensure log directory exists
+    const logDir = process.env.MCP_BUILD_LOG_DIR || path.join(process.cwd(), 'logs', 'builds');
+    await fs.mkdir(logDir, { recursive: true });
+
+    const outLogPath = path.join(logDir, `${buildId}.out.log`);
+    const errLogPath = path.join(logDir, `${buildId}.err.log`);
+
+    const workerEnv: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      BUILD_ID: buildId,
+      SUPABASE_URL: supabaseUrl,
+      SUPABASE_ANON_KEY: anonKey,
+      SUPABASE_ACCESS_TOKEN: accessToken,
+      MCP_DISPATCHER_URL: `http://localhost:${process.env.MCP_SERVER_PORT || '3001'}`,
+    };
+    if (supabaseServiceRoleKey) {
+      workerEnv['MCP_SUPABASE_SERVICE_ROLE_KEY'] = supabaseServiceRoleKey;
+    }
+    if (process.env.MCP_BUILD_API_KEY) {
+      workerEnv['MCP_BUILD_API_KEY'] = process.env.MCP_BUILD_API_KEY;
+    }
+
+    // Spawn worker
+    const workerScript = path.join(process.cwd(), 'build-worker.ts');
+    const child = spawn('npx', ['tsx', workerScript], {
+      env: workerEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+    });
+
+    const outStream = await fs.open(outLogPath, 'a').then(fh => fh.createWriteStream());
+    const errStream = await fs.open(errLogPath, 'a').then(fh => fh.createWriteStream());
+
+    child.stdout?.pipe(outStream);
+    child.stderr?.pipe(errStream);
+
+    const session: import('./build-orchestrator.js').WorkerSession = {
+      buildId,
+      pid: child.pid!,
+      process: child,
+      startedAt: new Date().toISOString(),
+      logFile: outLogPath,
+      errFile: errLogPath,
+    };
+
+    this.buildOrchestrator.registerWorker(session);
+
+    // Track in activeBuildTracker for /api/builds compatibility
+    this.activeBuildTracker.set(buildId, {
+      buildId,
+      projectId: '',
+      projectName: buildId,
+      startedAt: session.startedAt,
+      currentStep: 0,
+      totalSteps: 0,
+      status: 'running',
+      projectPath: '',
+    });
+
+    console.log(`[MCP Server] Worker spawned for build ${buildId} (pid: ${child.pid})`);
+
+    // Cleanup on exit
+    child.on('exit', (code, signal) => {
+      console.log(`[MCP Server] Worker for build ${buildId} exited (code=${code}, signal=${signal})`);
+      this.buildOrchestrator.unregisterWorker(buildId);
+      this.activeBuildTracker.delete(buildId);
+      outStream.close();
+      errStream.close();
+    });
+
+    return { sessionPid: child.pid };
   }
 
   /** Parse MCP tool result (content[0].text) to extract JSON. */
@@ -5780,9 +5890,9 @@ module.exports = {
             }
             const serviceRoleKey = supabaseServiceRoleKey || process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
             this.runBuild(buildId, supabaseUrl, accessToken, anonKey, serviceRoleKey || undefined)
-              .then(() => {
+              .then((result) => {
                 res.writeHead(200, cors);
-                res.end(JSON.stringify({ started: true }));
+                res.end(JSON.stringify({ started: true, buildId, sessionPid: result.sessionPid }));
               })
               .catch((err) => {
                 const message = err instanceof Error ? err.message : 'Build start failed';
@@ -5867,6 +5977,64 @@ module.exports = {
         return;
       }
 
+      // ──── GET /api/sessions ────
+      if (req.method === 'GET' && (urlPath === '/api/sessions' || urlPath === '/api/sessions/')) {
+        // Reap any dead workers before listing
+        this.buildOrchestrator.reapDeadWorkers();
+        const sessions = this.buildOrchestrator.getAllSessions();
+        res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+        res.end(JSON.stringify({
+          sessions,
+          activeCount: sessions.length,
+          maxConcurrent: parseInt(process.env.MCP_MAX_CONCURRENT_BUILDS || '5', 10),
+        }));
+        return;
+      }
+
+      // ──── POST /api/sessions/:buildId/stop ────
+      const sessionStopMatch = urlPath.match(/^\/api\/sessions\/([^/]+)\/stop\/?$/);
+      if (req.method === 'POST' && sessionStopMatch) {
+        if (apiKey) {
+          const headerKey = req.headers['x-api-key'];
+          if (headerKey !== apiKey) {
+            res.writeHead(401, cors);
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        const targetBuildId = sessionStopMatch[1];
+        try {
+          const stopped = await this.buildOrchestrator.stopWorker(targetBuildId);
+          if (!stopped) {
+            res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: 'Session not found' }));
+            return;
+          }
+          // Update build status in DB if we have service role key
+          const serviceKey = process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
+          const sbUrl = process.env.SUPABASE_URL?.trim();
+          if (serviceKey && sbUrl) {
+            try {
+              const db = createClient(sbUrl, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
+              await db.from('automated_builds').update({ status: 'canceled', updated_at: new Date().toISOString() }).eq('id', targetBuildId);
+              await db.from('build_logs').insert({
+                build_id: targetBuildId,
+                log_type: 'build_log',
+                message: 'Build canceled via /api/sessions/:buildId/stop',
+                created_at: new Date().toISOString(),
+              });
+            } catch { /* non-blocking */ }
+          }
+          this.activeBuildTracker.delete(targetBuildId);
+          res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify({ stopped: true, buildId: targetBuildId }));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+        }
+        return;
+      }
+
       console.error('[MCP Server] 404 - No handler for:', req.method, urlPath, '(full:', url, ')');
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -5880,6 +6048,8 @@ module.exports = {
           '/api/health',
           '/api/builds',
           '/api/builds/:id/preview',
+          '/api/sessions',
+          '/api/sessions/:id/stop',
         ],
       }));
     });
@@ -5900,6 +6070,11 @@ module.exports = {
       console.error(`  GET    http://${host}:${port}/api/builds`);
       console.error(`  POST   http://${host}:${port}/api/builds/:id/preview`);
       console.error(`  DELETE http://${host}:${port}/api/builds/:id/preview`);
+      console.error(`  GET    http://${host}:${port}/api/sessions`);
+      console.error(`  POST   http://${host}:${port}/api/sessions/:id/stop`);
+      if (process.env.MCP_USE_BUILD_WORKERS === 'true') {
+        console.error(`  [Worker mode ENABLED] Each build spawns an isolated worker process`);
+      }
     });
   }
 
@@ -5941,6 +6116,7 @@ module.exports = {
           'accessToken',
           'anonKey',
           'gitHubToken',
+          'cursorApiKey',
         ]);
         const sanitizedToolArgs = Object.fromEntries(
           Object.entries(args).map(([key, value]) => [key, REDACT_KEYS.has(key) ? maskSecret(value) : value])

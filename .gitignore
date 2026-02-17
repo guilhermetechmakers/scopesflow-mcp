@@ -41,3 +41,6 @@ yarn-error.log*
 
 # Cursor projects (generated, should not be tracked)
 cursor-projects/
+
+# Per-build worker log files
+logs/builds/
