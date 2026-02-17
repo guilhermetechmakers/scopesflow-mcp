@@ -1,4 +1,5 @@
 import * as path from 'path';
+import { access } from 'fs/promises';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 /** Config passed to create-project (matches server CursorProjectConfig shape). */
@@ -115,6 +116,10 @@ export interface AutomatedBuildRow {
   user_id: string;
   status: string;
   progress?: number;
+  /** Path to the project directory (set after create-project, used for resume). */
+  cursor_project_path?: string | null;
+  /** Last completed step index (0-based, used for resume). */
+  current_step?: number | null;
   configuration?: {
     cursorConfig?: BuildCursorConfig;
     prompts?: string[];
@@ -229,16 +234,17 @@ export async function runBuildLoop(
     }
   };
 
-  const updateStatus = async (status: string, progress?: number) => {
+  const updateStatus = async (status: string, progress?: number, currentStep?: number) => {
     try {
       // Attempt to refresh token before database operation
       await refreshTokenIfNeeded();
       
-      const payload: { status: string; progress?: number; updated_at?: string } = {
+      const payload: { status: string; progress?: number; current_step?: number; updated_at?: string } = {
         status,
         updated_at: new Date().toISOString(),
       };
       if (progress !== undefined) payload.progress = progress;
+      if (currentStep !== undefined) payload.current_step = currentStep;
       
       const { error } = await supabase
         .from('automated_builds')
@@ -310,6 +316,9 @@ export async function runBuildLoop(
   const configuration = row.configuration;
   const cursorConfig = configuration?.cursorConfig;
 
+  const existingProjectPath = row.cursor_project_path ?? undefined;
+  const isResume = !!existingProjectPath;
+
   if (!configuration || !cursorConfig) {
     log('Build configuration or cursorConfig missing', 'error');
     await updateStatus('failed');
@@ -368,8 +377,9 @@ export async function runBuildLoop(
   const rawPrompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
   if (rawPrompts.length > 0) {
     promptSource = 'configuration.prompts';
-    promptQueue = rawPrompts.map((text, idx) => ({
-      id: `cfg-${idx}`,
+    const skipCount = isResume ? (row.current_step ?? 0) : 0;
+    promptQueue = rawPrompts.slice(skipCount).map((text, idx) => ({
+      id: `cfg-${skipCount + idx}`,
       prompt_content: text,
       title: text.length > 60 ? `${text.substring(0, 60)}...` : text,
       source: 'sequence' as const,
@@ -386,12 +396,15 @@ export async function runBuildLoop(
         // Attempt to refresh token before database operation
         await refreshTokenIfNeeded();
         
-        const { data: flowchartRows, error: flowchartError } = await supabase
+        let flowchartQuery = supabase
           .from('flowchart_items')
           .select('id, prompt, prompt_content, sequence_order')
           .eq('project_id', projectId)
-          .eq('type', 'prompt')
-          .order('sequence_order', { ascending: true });
+          .eq('type', 'prompt');
+        if (isResume) {
+          flowchartQuery = flowchartQuery.eq('is_implemented', false);
+        }
+        const { data: flowchartRows, error: flowchartError } = await flowchartQuery.order('sequence_order', { ascending: true });
         if (flowchartError) {
           log(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
           await appendLog(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
@@ -419,6 +432,11 @@ export async function runBuildLoop(
     }
   }
   if (promptQueue.length === 0) {
+    if (isResume) {
+      await appendLog('All prompts already implemented. Marking build as completed.');
+      await updateStatus('completed', 100);
+      return;
+    }
     const message = `No prompts found for build ${buildId}. Checked configuration.prompts and flowchart_items.`;
     log(message, 'error');
     await appendLog(message, 'error');
@@ -475,27 +493,43 @@ export async function runBuildLoop(
     const projectName = (rawProjectName as string).trim();
     const baseDir =
       process.env.MCP_BUILD_PROJECTS_DIR || process.env.TMPDIR || process.cwd();
-    const projectPath = hasString(rawProjectPath)
-      ? rawProjectPath.trim()
-      : path.join(baseDir, 'builds', buildId, projectName);
-    if (!hasString(rawProjectPath)) {
-      await appendLog(`projectPath missing; using default path ${projectPath}`);
-    }
+    let projectPath: string;
 
-    const createConfig: BuildCursorConfig = {
-      ...(mergedCursorConfig as unknown as BuildCursorConfig),
-      projectName,
-      projectPath,
-    };
-    if (githubAuth) {
-      if (githubAuth.gitHubToken) createConfig.gitHubToken = githubAuth.gitHubToken;
-      if (githubAuth.gitUserName) createConfig.gitUserName = githubAuth.gitUserName;
-      if (githubAuth.gitUserEmail) createConfig.gitUserEmail = githubAuth.gitUserEmail;
-    }
+    if (isResume && existingProjectPath) {
+      projectPath = existingProjectPath.trim();
+      try {
+        await access(projectPath);
+      } catch {
+        const message = 'Project directory not found. Cannot resume.';
+        log(message, 'error');
+        await appendLog(message, 'error');
+        await updateStatus('failed');
+        return;
+      }
+      await appendLog(`Resuming build at existing project: ${projectPath}`);
+    } else {
+      projectPath = hasString(rawProjectPath)
+        ? rawProjectPath.trim()
+        : path.join(baseDir, 'builds', buildId, projectName);
+      if (!hasString(rawProjectPath)) {
+        await appendLog(`projectPath missing; using default path ${projectPath}`);
+      }
 
-    await appendLog(`Creating project at ${projectPath}`);
-    await createProjectFn(createConfig);
-    await appendLog('Project created');
+      const createConfig: BuildCursorConfig = {
+        ...(mergedCursorConfig as unknown as BuildCursorConfig),
+        projectName,
+        projectPath,
+      };
+      if (githubAuth) {
+        if (githubAuth.gitHubToken) createConfig.gitHubToken = githubAuth.gitHubToken;
+        if (githubAuth.gitUserName) createConfig.gitUserName = githubAuth.gitUserName;
+        if (githubAuth.gitUserEmail) createConfig.gitUserEmail = githubAuth.gitUserEmail;
+      }
+
+      await appendLog(`Creating project at ${projectPath}`);
+      await createProjectFn(createConfig);
+      await appendLog('Project created');
+    }
 
     // Start heartbeat (dashboard watches last_heartbeat to detect stale builds)
     heartbeatTimer = setInterval(async () => {
@@ -508,8 +542,9 @@ export async function runBuildLoop(
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    let totalSteps = promptQueue.length || 1;
-    let currentStep = 0;
+    const completedSteps = isResume ? (row.current_step ?? 0) : 0;
+    let totalSteps = completedSteps + promptQueue.length || 1;
+    let currentStep = completedSteps;
 
     // Derive projectId for tracker
     const projectId =
@@ -706,7 +741,7 @@ export async function runBuildLoop(
       isFirstPrompt = false;
       await appendLog(`Prompt ${currentStep}/${totalSteps} ${stepStatus}`);
       const progress = Math.round((currentStep / totalSteps) * 100);
-      await updateStatus('running', progress);
+      await updateStatus('running', progress, currentStep);
 
       // ──── Update active build tracker ────
       if (activeBuildTracker) {
