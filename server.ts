@@ -1801,8 +1801,26 @@ REQUIRED SUPABASE SETUP:
 1. Install Supabase client: npm install @supabase/supabase-js
 2. Create src/lib/supabase.ts with proper client initialization
 3. Use environment variables from .env.local (import.meta.env.VITE_SUPABASE_URL and import.meta.env.VITE_SUPABASE_ANON_KEY)
-4. Follow Supabase best practices for auth and data fetching
-5. Use Edge Functions for LLM and any server-only or secret-using logic; invoke with supabase.functions.invoke('function-name', { body }). Never expose LLM or third-party API keys in the client.
+
+AUTHENTICATION (MANDATORY when Supabase is configured):
+- USE: supabase.auth.signInWithPassword, signUp, signOut, getSession, onAuthStateChange
+- USE: AuthProvider/useAuth pattern wrapping Supabase auth state
+- DO NOT: Create custom /auth/login API or localStorage token auth
+- DO NOT: Use generic api.post('/auth/login') when Supabase is connected
+
+CRUD REQUIREMENTS (for each data entity in the requirements):
+1. Create src/api/{entity}.ts with: getAll, getById, create, update, delete (using Supabase client)
+2. Create src/hooks/use{Entity}.ts with: use{Entities}(), use{Entity}(id), useCreate{Entity}(), useUpdate{Entity}(), useDelete{Entity}()
+3. Use React Query for caching, invalidation, optimistic updates
+4. Follow patterns in SUPABASE_API_EXAMPLES.md
+
+EDGE FUNCTIONS - CREATE when feature requires:
+- LLM/AI features (chat, completions, embeddings) → create Edge Function, invoke via supabase.functions.invoke
+- Third-party APIs (Stripe, SendGrid, etc.) → create Edge Function
+- Webhooks (incoming) → create Edge Function
+- Heavy computation or server-only logic → create Edge Function
+DO NOT use Edge for: CRUD, Auth, Realtime, Storage — use Supabase client directly.
+Never expose LLM or third-party API keys in the client.
 
 Note: Database migrations will be handled in subsequent prompts when database features are needed.
 
@@ -1822,10 +1840,28 @@ REQUIRED SUPABASE SETUP:
 3. Use environment variables from .env.local (import.meta.env.VITE_SUPABASE_URL and import.meta.env.VITE_SUPABASE_ANON_KEY)
 4. Implement proper type safety with Supabase types
 5. Follow Supabase best practices for auth, RLS, and data fetching
-6. Integrate Supabase auth with the app's authentication system if needed
-7. Use React Query or similar for data fetching with Supabase
-8. Implement proper error handling for Supabase operations
-9. Use Edge Functions for LLM and any server-only or secret-using logic; invoke with supabase.functions.invoke('function-name', { body }). Never expose LLM or third-party API keys in the client.
+6. Use React Query or similar for data fetching with Supabase
+7. Implement proper error handling for Supabase operations
+
+AUTHENTICATION (MANDATORY):
+- USE: supabase.auth.signInWithPassword, signUp, signOut, getSession, onAuthStateChange
+- USE: AuthProvider/useAuth pattern wrapping Supabase auth state
+- DO NOT: Create custom /auth/login API or localStorage token auth
+- DO NOT: Use generic api.post('/auth/login') when Supabase is connected
+
+CRUD REQUIREMENTS (for each data entity):
+1. Create src/api/{entity}.ts with: getAll, getById, create, update, delete (using Supabase client)
+2. Create src/hooks/use{Entity}.ts with: use{Entities}(), use{Entity}(id), useCreate{Entity}(), useUpdate{Entity}(), useDelete{Entity}()
+3. Use React Query for caching, invalidation, optimistic updates
+4. Follow patterns in SUPABASE_API_EXAMPLES.md
+
+EDGE FUNCTIONS - CREATE when feature requires:
+- LLM/AI features (chat, completions, embeddings) → create Edge Function, invoke via supabase.functions.invoke
+- Third-party APIs (Stripe, SendGrid, etc.) → create Edge Function
+- Webhooks (incoming) → create Edge Function
+- Heavy computation or server-only logic → create Edge Function
+DO NOT use Edge for: CRUD, Auth, Realtime, Storage — use Supabase client directly.
+Never expose LLM or third-party API keys in the client.
 
 === DATABASE MIGRATION WORKFLOW (CRITICAL) ===
 
@@ -2065,6 +2101,7 @@ ${apiLayerGuide}
 
 === PROJECT REQUIREMENTS ===
 ${args.prompt}
+${supabaseInstructions}
 
 IMPLEMENTATION INSTRUCTIONS:
 1. Follow the DESIGN REFERENCE section above EXACTLY for ALL UI/UX implementation
