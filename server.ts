@@ -3294,10 +3294,13 @@ This task was created by ScopesFlow automation. To complete:
       }, this.DEV_SERVER_CHECK_TIMEOUT);
       
       try {
-        // Start dev server (use single command string with empty args to avoid DEP0190 deprecation)
-        devProcess = spawn('npm run dev', [], {
+        // Start dev server - use npm + args with explicit env for cross-platform reliability
+        // (exit 127 = "command not found" when npm isn't in PATH; passing env helps on Windows/CI)
+        // Use shell: true so npm.cmd works on Windows; explicit env ensures PATH is inherited
+        devProcess = spawn('npm', ['run', 'dev'], {
           cwd: projectPath,
           shell: true,
+          env: { ...process.env },
           stdio: ['ignore', 'pipe', 'pipe']
         });
         
