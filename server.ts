@@ -5940,6 +5940,75 @@ module.exports = {
         return;
       }
 
+      // ──── GET /api/builds/:id/agent-status ────
+      const agentStatusMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/agent-status\/?$/);
+      if (req.method === 'GET' && agentStatusMatch) {
+        const targetBuildId = agentStatusMatch[1];
+        const serviceKey = process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
+        const sbUrl = process.env.SUPABASE_URL?.trim();
+
+        if (!serviceKey || !sbUrl) {
+          res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify({ error: 'Server not configured with Supabase credentials' }));
+          return;
+        }
+
+        try {
+          const db = createClient(sbUrl, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
+
+          const { data, error } = await db
+            .from('automated_builds')
+            .select(`
+              id, current_agent_phase,
+              developer_completed_at, design_completed_at, debug_completed_at,
+              developer_completion_pct,
+              design_issues_found, design_issues_fixed,
+              debug_issues_found, debug_issues_fixed,
+              agent_loop_count
+            `)
+            .eq('id', targetBuildId)
+            .single();
+
+          if (error || !data) {
+            res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: 'Build not found' }));
+            return;
+          }
+
+          const response = {
+            buildId: data.id,
+            currentPhase: data.current_agent_phase,
+            phases: {
+              developer: {
+                status: data.developer_completed_at ? 'completed' : data.current_agent_phase === 'developer' ? 'running' : 'pending',
+                completionPct: data.developer_completion_pct,
+                completedAt: data.developer_completed_at,
+                loopCount: data.agent_loop_count,
+              },
+              design: {
+                status: data.design_completed_at ? 'completed' : data.current_agent_phase === 'design' ? 'running' : 'pending',
+                issuesFound: data.design_issues_found,
+                issuesFixed: data.design_issues_fixed,
+                completedAt: data.design_completed_at,
+              },
+              debug: {
+                status: data.debug_completed_at ? 'completed' : data.current_agent_phase === 'debug' ? 'running' : 'pending',
+                issuesFound: data.debug_issues_found,
+                issuesFixed: data.debug_issues_fixed,
+                completedAt: data.debug_completed_at,
+              },
+            },
+          };
+
+          res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify(response));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+        }
+        return;
+      }
+
       // ──── POST /api/builds/:id/preview ────
       const previewStartMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/preview\/?$/);
       if (req.method === 'POST' && previewStartMatch) {
@@ -6051,6 +6120,7 @@ module.exports = {
           '/api/start-build',
           '/api/health',
           '/api/builds',
+          '/api/builds/:id/agent-status',
           '/api/builds/:id/preview',
           '/api/sessions',
           '/api/sessions/:id/stop',
@@ -6072,6 +6142,7 @@ module.exports = {
       console.error(`  POST   http://${host}:${port}/api/start-build`);
       console.error(`  GET    http://${host}:${port}/api/health`);
       console.error(`  GET    http://${host}:${port}/api/builds`);
+      console.error(`  GET    http://${host}:${port}/api/builds/:id/agent-status`);
       console.error(`  POST   http://${host}:${port}/api/builds/:id/preview`);
       console.error(`  DELETE http://${host}:${port}/api/builds/:id/preview`);
       console.error(`  GET    http://${host}:${port}/api/sessions`);

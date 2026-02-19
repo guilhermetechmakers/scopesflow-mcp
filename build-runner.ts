@@ -1,6 +1,8 @@
 import * as path from 'path';
 import { access } from 'fs/promises';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { runDesignAgent } from './design-agent-runner.js';
+import { runDebugAgent } from './debug-agent-runner.js';
 
 /** Config passed to create-project (matches server CursorProjectConfig shape). */
 export interface BuildCursorConfig {
@@ -133,6 +135,18 @@ export interface AutomatedBuildRow {
   updated_at?: string;
 }
 
+/** Parse MCP tool result (content[0].text) to extract typed JSON. */
+export const parseMcpResult = (res: unknown): ExecutePromptResult => {
+  try {
+    const r = res as { content?: Array<{ type?: string; text?: string }> };
+    const text = r?.content?.[0]?.text;
+    if (!text) return { success: false, error: 'No result content' };
+    return JSON.parse(text) as ExecutePromptResult;
+  } catch {
+    return { success: false, error: 'Failed to parse execute result' };
+  }
+};
+
 /**
  * Build loop: load build + config + prompts from DB, create project, run prompts,
  * write build_logs and update automated_builds (status, progress).
@@ -143,18 +157,6 @@ export async function runBuildLoop(
   options: RunBuildLoopOptions
 ): Promise<void> {
   const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker, cursorApiKey } = options;
-
-  /** Parse MCP tool result (content[0].text) to extract typed JSON. */
-  const parseMcpResult = (res: unknown): ExecutePromptResult => {
-    try {
-      const r = res as { content?: Array<{ type?: string; text?: string }> };
-      const text = r?.content?.[0]?.text;
-      if (!text) return { success: false, error: 'No result content' };
-      return JSON.parse(text) as ExecutePromptResult;
-    } catch {
-      return { success: false, error: 'Failed to parse execute result' };
-    }
-  };
 
   const log = (message: string, level: 'info' | 'error' = 'info') => {
     console.error(`[BuildRunner] ${message}`);
@@ -764,10 +766,197 @@ export async function runBuildLoop(
       }
     }
 
-    await updateStatus('prompts_completed', 100);
-    await appendLog('All prompts executed. Awaiting ScopesFlow to finalize project.');
+    // ══════ DEVELOPER AGENT CONTINUOUS LOOP ══════
+    // After initial prompt queue is exhausted, enter analysis→generate→execute
+    // loop until GitHub analysis reports ≥ 90% completion.
 
-    // Clean up tracker
+    const COMPLETION_THRESHOLD = 90;
+    const MAX_AGENT_LOOPS = 50;
+    const MAX_CONSECUTIVE_ERRORS = 3;
+    let agentLoopCount = 0;
+    let consecutiveErrors = 0;
+
+    await appendLog('Initial prompt queue exhausted. Entering Developer Agent loop...');
+
+    while (agentLoopCount < MAX_AGENT_LOOPS) {
+      agentLoopCount++;
+      consecutiveErrors = 0;
+
+      const { data: buildCheck } = await supabase
+        .from('automated_builds')
+        .select('status')
+        .eq('id', buildId)
+        .single();
+      if (buildCheck?.status === 'cancelled') {
+        await appendLog('Build cancelled, exiting agent loop');
+        break;
+      }
+
+      await supabase.from('automated_builds')
+        .update({ agent_loop_count: agentLoopCount })
+        .eq('id', buildId);
+
+      await appendLog(`Developer Agent loop ${agentLoopCount}/${MAX_AGENT_LOOPS}: Analyzing project...`);
+
+      let phaseResult: {
+        completionPct: number;
+        phaseComplete: boolean;
+        nextPrompt?: { id: string; prompt_content: string; title: string; source: string; type: string };
+        error?: string;
+      };
+
+      try {
+        const { data, error } = await supabase.functions.invoke('agent-phase-continue', {
+          body: { buildId, projectId, phase: 'developer' },
+        });
+
+        if (error) {
+          consecutiveErrors++;
+          await appendLog(`Agent loop error: ${error.message}`, 'error');
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            await appendLog(`${MAX_CONSECUTIVE_ERRORS} consecutive errors, exiting agent loop`, 'error');
+            break;
+          }
+          await new Promise(r => setTimeout(r, 5000));
+          continue;
+        }
+
+        phaseResult = data;
+      } catch (err) {
+        consecutiveErrors++;
+        const msg = err instanceof Error ? err.message : String(err);
+        await appendLog(`Agent loop exception: ${msg}`, 'error');
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) break;
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
+      }
+
+      await appendLog(`GitHub analysis: ${phaseResult.completionPct}% complete`);
+      await supabase.from('automated_builds')
+        .update({ developer_completion_pct: phaseResult.completionPct })
+        .eq('id', buildId);
+
+      if (phaseResult.phaseComplete || phaseResult.completionPct >= COMPLETION_THRESHOLD) {
+        await appendLog(`Developer Agent reached ${phaseResult.completionPct}% — phase complete!`);
+        await supabase.from('automated_builds')
+          .update({
+            developer_completed_at: new Date().toISOString(),
+            developer_completion_pct: phaseResult.completionPct,
+          })
+          .eq('id', buildId);
+        break;
+      }
+
+      if (phaseResult.nextPrompt) {
+        currentStep++;
+        totalSteps++;
+
+        const promptContent = phaseResult.nextPrompt.prompt_content;
+        const preview = promptContent.length > 60
+          ? `${promptContent.substring(0, 60).replace(/\n/g, ' ')}...`
+          : promptContent.replace(/\n/g, ' ');
+
+        await appendLog(`Agent loop prompt ${currentStep}/${totalSteps}: ${preview}`);
+
+        let stepRowId: string | null = null;
+        try {
+          const { data: stepRow } = await supabase.from('build_steps').insert({
+            build_id: buildId,
+            step_number: currentStep,
+            prompt_id: phaseResult.nextPrompt.id,
+            prompt_content: promptContent,
+            prompt_source: 'generated',
+            agent_phase: 'developer',
+            status: 'running',
+            started_at: new Date().toISOString(),
+            retry_count: 0,
+          }).select().single();
+          stepRowId = stepRow?.id ?? null;
+        } catch { /* non-blocking */ }
+
+        const stepStartMs = Date.now();
+        const executeArgs: BuildExecutePromptArgs = {
+          prompt: promptContent,
+          projectPath,
+          timeout: timeoutPerStep,
+          context: `Developer Agent loop ${agentLoopCount}`,
+          isFirstPrompt: false,
+          retryCount: 0,
+          isRetry: false,
+          supabaseClient: supabase,
+          userId: row.user_id,
+          buildId,
+          model,
+          cursorApiKey,
+        };
+        if (githubAuth) {
+          if (githubAuth.gitHubToken) executeArgs.gitHubToken = githubAuth.gitHubToken;
+          if (githubAuth.gitUserName) executeArgs.gitUserName = githubAuth.gitUserName;
+          if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
+        }
+
+        const rawResult = await executePromptFn(executeArgs);
+        const execResult = parseMcpResult(rawResult);
+
+        if (stepRowId) {
+          try {
+            await supabase.from('build_steps').update({
+              status: execResult.success ? 'completed' : 'failed',
+              completed_at: new Date().toISOString(),
+              duration_ms: Date.now() - stepStartMs,
+              files_changed: execResult.filesChanged ?? [],
+              error_message: execResult.error ?? null,
+            }).eq('id', stepRowId);
+          } catch { /* non-blocking */ }
+        }
+
+        await appendLog(`Agent loop prompt ${execResult.success ? 'completed' : 'failed'}`);
+        const progress = Math.round((currentStep / totalSteps) * 100);
+        await updateStatus('running', Math.min(progress, 89), currentStep);
+      } else {
+        await appendLog('No more prompts could be generated. Ending developer loop.');
+        break;
+      }
+    }
+
+    // ══════ AGENT PIPELINE ORCHESTRATION ══════
+
+    const agentOptions = {
+      supabase,
+      buildId,
+      projectId,
+      projectPath,
+      executePromptFn,
+      model,
+      cursorApiKey,
+      githubAuth,
+      userId: row.user_id,
+    };
+
+    // Phase 2: Design Agent
+    try {
+      await appendLog('Starting Design Agent phase...');
+      await runDesignAgent(agentOptions);
+      await appendLog('Design Agent phase completed.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await appendLog(`Design Agent failed: ${msg}`, 'error');
+    }
+
+    // Phase 3: Debug Agent
+    try {
+      await appendLog('Starting Debug Agent phase...');
+      await runDebugAgent(agentOptions);
+      await appendLog('Debug Agent phase completed.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await appendLog(`Debug Agent failed: ${msg}`, 'error');
+    }
+
+    // ══════ ALL PHASES COMPLETE ══════
+    await updateStatus('completed', 100);
+    await appendLog('All agent phases completed. Build is MVP-ready.');
+
     if (activeBuildTracker) {
       activeBuildTracker.delete(buildId);
     }
