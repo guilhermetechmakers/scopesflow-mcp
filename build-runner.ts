@@ -46,7 +46,7 @@ export interface BuildExecutePromptArgs {
   userId?: string;
   /** When set, the MCP server can append to build_logs for this build in realtime. */
   buildId?: string;
-  /** Model to use for cursor-agent (defaults to "auto" if not provided). */
+  /** Model to use for cursor-agent (defaults to "composer-1.5" if not provided). */
   model?: string;
   /** Per-user Cursor API key (passed to cursor-agent via CURSOR_API_KEY env var). */
   cursorApiKey?: string;
@@ -438,8 +438,8 @@ export async function runBuildLoop(
   }
   if (promptQueue.length === 0) {
     if (isResume) {
-      await appendLog('All prompts already implemented. Marking build as completed.');
-      await updateStatus('completed', 100);
+      await appendLog('All prompts already implemented. Awaiting ScopesFlow to finalize.');
+      await updateStatus('prompts_completed', 100);
       return;
     }
     const message = `No prompts found for build ${buildId}. Checked configuration.prompts and flowchart_items.`;
@@ -764,8 +764,8 @@ export async function runBuildLoop(
       }
     }
 
-    await updateStatus('completed', 100);
-    await appendLog('Build completed successfully');
+    await updateStatus('prompts_completed', 100);
+    await appendLog('All prompts executed. Awaiting ScopesFlow to finalize project.');
 
     // Clean up tracker
     if (activeBuildTracker) {

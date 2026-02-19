@@ -1,25 +1,27 @@
 # Model Selection Feature — Implementation Plan
 
 ## Summary
-Enable dynamic model selection for Cursor Agent prompts. Currently, the model is hardcoded as "auto" in the `executePrompt` method. This feature will allow the app to specify which model to use when calling `cursor/execute-prompt`, particularly for the first prompt when creating a project. The model parameter will be optional and default to "auto" if not provided, maintaining backward compatibility.
+Enable dynamic model selection for Cursor Agent prompts. The model parameter flows from the app → MCP tool call → `ExecutePromptArgs` → command construction. The default model is **composer-1.5** when not provided. All model usages (including auto-fix) must derive from `args.model`.
 
 ## Scope
 - In scope:
   - Add `model` parameter to `ExecutePromptArgs` interface
   - Add `model` parameter to `cursor/execute-prompt` tool schema
-  - Update command construction in `executePrompt` to use the provided model (defaulting to "auto")
-  - Update `autoFixBuildErrors` to accept and use model parameter (defaulting to "auto")
+  - Update command construction in `executePrompt` to use the provided model (defaulting to "composer-1.5")
+  - Update `autoFixBuildErrors` to accept and use model parameter (defaulting to "composer-1.5")
   - Add `model` parameter to `BuildExecutePromptArgs` in build-runner.ts
   - Update validation functions to accept the model parameter
+  - **All models from args.model**: No hardcoded models; autoFixBuildErrors must receive and use `args.model`
+  - **Default model**: composer-1.5 (replacing "auto")
 - Out of scope:
   - Model validation/enumeration (will accept any string, trusting the app to provide valid models)
   - Model selection UI in the app (handled by the app)
   - Persisting model preference per project (can be added later if needed)
 
 ## Architecture / Approach
-The model parameter will flow from the app → MCP tool call → `ExecutePromptArgs` → command construction. The change is minimal and backward-compatible since the model defaults to "auto" if not provided. The model is used in the cursor-agent command line argument `--model <model>`.
+The model parameter will flow from the app → MCP tool call → `ExecutePromptArgs` → command construction. The change is minimal and backward-compatible since the model defaults to "composer-1.5" if not provided. The model is used in the cursor-agent command line argument `--model <model>`.
 
-Available models (from comment in code): auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro
+Available models (from comment in code): auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
 
 ## Implementation Steps
 
@@ -58,19 +60,28 @@ Available models (from comment in code): auto, sonnet-4.5, sonnet-4.5-thinking, 
 - Description: Extract model from configuration (mergedCursorConfig or top-level config) and pass it to `executeArgs` when calling `executePromptFn`
 - Status: Completed
 
+### Step 8: All Models from args.model + Default composer-1.5 ✅
+- Files modified: `server.ts`, `build-runner.ts`
+- Description:
+  1. **Default model**: Change all `'auto'` fallbacks to `'composer-1.5'` (server.ts lines 61, 2252, 2259; build-runner.ts line 49 comment; autoFixBuildErrors)
+  2. **Pass args.model to autoFixBuildErrors**: Call site at server.ts line 2389 must pass `args.model`: `this.autoFixBuildErrors(actualProjectPath, validationResult, 0, args.model)`
+  3. **Use model in autoFixBuildErrors command**: Replace hardcoded `--model auto` at lines 3453, 3455 with `const modelArg = model || 'composer-1.5'` and `--model ${modelArg}`
+- Status: Completed
+
 ## Data / API Changes
 - **API Change**: `cursor/execute-prompt` tool now accepts optional `model` parameter
 - **No database changes**: Model is passed at runtime, not persisted
-- **Backward compatible**: All existing calls without `model` will default to "auto"
+- **Default model**: composer-1.5 (when `model` not provided)
+- **Backward compatible**: All existing calls without `model` will default to "composer-1.5"
 
 ## Testing / Validation
 1. Test with model parameter: Call `cursor/execute-prompt` with `model: "sonnet-4.5"` and verify the command uses that model
-2. Test without model parameter: Call `cursor/execute-prompt` without `model` and verify it defaults to "auto"
+2. Test without model parameter: Call `cursor/execute-prompt` without `model` and verify it defaults to "composer-1.5"
 3. Test first prompt: Verify model can be passed when creating a project and executing the first prompt
-4. Test auto-fix: Verify `autoFixBuildErrors` still works (will use default "auto")
+4. Test auto-fix: Verify `autoFixBuildErrors` uses `args.model` (or default "composer-1.5") in its cursor-agent command
 
 ## Notes / Risks
 - **Assumption**: The app will provide valid model names. No validation is performed on the model string.
 - **Tradeoff**: We're not validating model names to keep it flexible for future models without code changes.
 - **Follow-up**: Consider adding model validation/enumeration if invalid models cause issues.
-- **Backward compatibility**: All existing code paths will continue to work with default "auto" model.
+- **Backward compatibility**: All existing code paths will continue to work with default "composer-1.5" model.
