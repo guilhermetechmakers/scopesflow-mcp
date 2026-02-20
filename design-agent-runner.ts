@@ -48,64 +48,86 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
 
   const designSystem = project?.ui_style_description ?? '';
 
-  const filesToAudit: string[] = [];
-  const srcPath = path.join(projectPath, 'src');
+  // Check for existing design issues (e.g. after pause/resume) — skip audit and continue fixing
+  const { count: existingCount } = await supabase
+    .from('design_audit_results')
+    .select('*', { count: 'exact', head: true })
+    .eq('build_id', buildId);
 
-  async function crawl(dir: string): Promise<void> {
-    try {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (filesToAudit.length >= MAX_FILES_TO_AUDIT) return;
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (entry.name === 'node_modules' || entry.name === '.git') continue;
-          await crawl(fullPath);
-        } else if (/\.(tsx|jsx)$/.test(entry.name)) {
-          filesToAudit.push(fullPath);
+  const hasExistingIssues = (existingCount ?? 0) > 0;
+
+  let totalIssues: number;
+
+  if (hasExistingIssues) {
+    totalIssues = existingCount ?? 0;
+    log(`Resuming design phase: ${totalIssues} existing issues found, skipping audit.`);
+  } else {
+    const filesToAudit: string[] = [];
+    const srcPath = path.join(projectPath, 'src');
+
+    async function crawl(dir: string): Promise<void> {
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (filesToAudit.length >= MAX_FILES_TO_AUDIT) return;
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            if (entry.name === 'node_modules' || entry.name === '.git') continue;
+            await crawl(fullPath);
+          } else if (/\.(tsx|jsx)$/.test(entry.name)) {
+            filesToAudit.push(fullPath);
+          }
         }
-      }
-    } catch { /* directory may not exist */ }
-  }
-
-  await crawl(path.join(srcPath, 'pages'));
-  await crawl(path.join(srcPath, 'components'));
-  await crawl(path.join(srcPath, 'app'));
-
-  log(`Found ${filesToAudit.length} files to audit`);
-
-  let totalIssues = 0;
-
-  for (const filePath of filesToAudit) {
-    const relativePath = path.relative(projectPath, filePath).replace(/\\/g, '/');
-
-    try {
-      const content = await fs.readFile(filePath, 'utf-8');
-      if (content.length < 50) continue;
-
-      const { data, error } = await supabase.functions.invoke('design-audit-file', {
-        body: {
-          buildId,
-          projectId,
-          filePath: relativePath,
-          fileContent: content,
-          projectDesignSystem: designSystem,
-        },
-      });
-
-      if (!error && data?.issues?.length > 0) {
-        totalIssues += data.issues.length;
-        log(`${relativePath}: ${data.issues.length} issues found`);
-      }
-    } catch (err) {
-      log(`Failed to audit ${relativePath}: ${err instanceof Error ? err.message : String(err)}`);
+      } catch { /* directory may not exist */ }
     }
+
+    await crawl(path.join(srcPath, 'pages'));
+    await crawl(path.join(srcPath, 'components'));
+    await crawl(path.join(srcPath, 'app'));
+
+    log(`Found ${filesToAudit.length} files to audit`);
+
+    totalIssues = 0;
+
+    for (const filePath of filesToAudit) {
+      const relativePath = path.relative(projectPath, filePath).replace(/\\/g, '/');
+
+      try {
+        const content = await fs.readFile(filePath, 'utf-8');
+        if (content.length < 50) continue;
+
+        const { data, error } = await supabase.functions.invoke('design-audit-file', {
+          body: {
+            buildId,
+            projectId,
+            filePath: relativePath,
+            fileContent: content,
+            projectDesignSystem: designSystem,
+          },
+        });
+
+        if (!error && data?.issues?.length > 0) {
+          totalIssues += data.issues.length;
+          log(`${relativePath}: ${data.issues.length} issues found`);
+        }
+      } catch (err) {
+        log(`Failed to audit ${relativePath}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    await supabase.from('automated_builds').update({
+      design_issues_found: totalIssues,
+    }).eq('id', buildId);
+
+    log(`Design audit complete. ${totalIssues} issues found.`);
   }
 
-  await supabase.from('automated_builds').update({
-    design_issues_found: totalIssues,
-  }).eq('id', buildId);
-
-  log(`Design audit complete. ${totalIssues} issues found.`);
+  // When resuming, ensure design_issues_found is set (may have been set in a previous run)
+  if (hasExistingIssues) {
+    await supabase.from('automated_builds').update({
+      design_issues_found: totalIssues,
+    }).eq('id', buildId);
+  }
 
   const { data: issues } = await supabase
     .from('design_audit_results')

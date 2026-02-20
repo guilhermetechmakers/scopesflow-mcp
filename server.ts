@@ -60,6 +60,7 @@ interface ExecutePromptArgs {
   buildId?: string;          // NEW: When set, server appends to build_logs for realtime following
   model?: string;            // NEW: Model to use for cursor-agent (defaults to "composer-1.5")
   cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
+  promptId?: string;         // NEW: Flowchart prompt ID — included in mcp_log for correct marking on completion
 }
 interface ProjectPathArgs {
   projectPath: string;
@@ -1151,7 +1152,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
   }
 
   private validateExecutePromptArgs(args: Record<string, unknown>): ExecutePromptArgs {
-    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId } = args;
+    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId, promptId } = args;
     
     if (typeof prompt !== 'string') throw new Error('Prompt must be a string');
     if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
@@ -1171,7 +1172,8 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       isRetry: typeof isRetry === 'boolean' ? isRetry : false,
       supabaseClient: supabaseClient instanceof Object && 'from' in supabaseClient ? supabaseClient as SupabaseClient : undefined,
       userId: typeof userId === 'string' ? userId : undefined,
-      buildId: typeof buildId === 'string' ? buildId : undefined
+      buildId: typeof buildId === 'string' ? buildId : undefined,
+      promptId: typeof promptId === 'string' ? promptId : undefined
     };
   }
 
@@ -2556,13 +2558,17 @@ Analyze the existing project structure and implement the task following the patt
             console.warn('[MCP Server] ⚠️ DEBUG: Token refresh failed (non-blocking):', refreshError instanceof Error ? refreshError.message : String(refreshError));
           }
           
-          const insertResult = await args.supabaseClient.from('build_logs').insert({
+          const insertPayload: Record<string, unknown> = {
             build_id: args.buildId,
             log_type: 'mcp_log',
             mcp_type: 'completed',
             message: 'Prompt step completed',
             created_at: new Date().toISOString(),
-          });
+          };
+          if (args.promptId) {
+            insertPayload.data = { promptId: args.promptId };
+          }
+          const insertResult = await args.supabaseClient.from('build_logs').insert(insertPayload);
           
           if (insertResult.error) {
             console.error('[MCP Server] ❌ DEBUG: mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
@@ -2888,13 +2894,17 @@ This task was created by ScopesFlow automation. To complete:
       // Insert mcp_log with mcp_type='completed' so UI can detect step completion
       if (args.buildId && args.supabaseClient) {
         try {
-          await args.supabaseClient.from('build_logs').insert({
+          const insertPayload: Record<string, unknown> = {
             build_id: args.buildId,
             log_type: 'mcp_log',
             mcp_type: 'completed',
             message: 'Prompt step completed (fallback: task file created)',
             created_at: new Date().toISOString(),
-          });
+          };
+          if (args.promptId) {
+            insertPayload.data = { promptId: args.promptId };
+          }
+          await args.supabaseClient.from('build_logs').insert(insertPayload);
         } catch (e) {
           console.warn('[MCP Server] Failed to insert completed mcp_log (non-blocking):', e instanceof Error ? e.message : e);
         }
@@ -5751,7 +5761,7 @@ module.exports = {
               try {
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Calling executePrompt...');
                 const execRes = await this.executePrompt(this.validateExecutePromptArgs({
-                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined,
+                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined, promptId,
                 }));
                 
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - executePrompt returned, parsing result...');
@@ -5786,21 +5796,21 @@ module.exports = {
                 }
                 
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Inserting mcp_log with mcp_type=', success ? 'completed' : 'failed');
-                let insertResult = await supabase.from('build_logs').insert({
+                const insertPayload: Record<string, unknown> = {
                   build_id: buildId, log_type: 'mcp_log', mcp_type: success ? 'completed' : 'failed',
                   message: success ? 'Prompt execution completed' : (execData.error || 'Prompt execution failed'),
                   created_at: new Date().toISOString(),
-                });
+                };
+                if (promptId) {
+                  insertPayload.data = { promptId };
+                }
+                let insertResult = await supabase.from('build_logs').insert(insertPayload);
                 
                 // If JWT expired and we have service role key, retry with service role client
                 if (insertResult.error && insertResult.error.code === 'PGRST301' && hasServiceRole && serviceRoleKey) {
                   console.log('[MCP Server] 🔄 DEBUG: HTTP handler - JWT expired, retrying with service role key...');
                   const serviceRoleClient = createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } });
-                  insertResult = await serviceRoleClient.from('build_logs').insert({
-                    build_id: buildId, log_type: 'mcp_log', mcp_type: success ? 'completed' : 'failed',
-                    message: success ? 'Prompt execution completed' : (execData.error || 'Prompt execution failed'),
-                    created_at: new Date().toISOString(),
-                  });
+                  insertResult = await serviceRoleClient.from('build_logs').insert(insertPayload);
                   if (!insertResult.error) {
                     console.log('[MCP Server] ✅ DEBUG: HTTP handler mcp_log insert succeeded with service role fallback (mcp_type=' + (success ? 'completed' : 'failed') + ')');
                   }

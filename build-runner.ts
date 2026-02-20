@@ -52,6 +52,8 @@ export interface BuildExecutePromptArgs {
   model?: string;
   /** Per-user Cursor API key (passed to cursor-agent via CURSOR_API_KEY env var). */
   cursorApiKey?: string;
+  /** Flowchart prompt ID — included in mcp_log so build-automation-handle-completion marks the correct prompt. */
+  promptId?: string;
 }
 
 export type CreateProjectFn = (config: BuildCursorConfig) => Promise<unknown>;
@@ -664,6 +666,7 @@ export async function runBuildLoop(
           buildId,
           model,
           cursorApiKey,
+          promptId: promptItem.id,
         };
         if (githubAuth) {
           if (githubAuth.gitHubToken) {
@@ -888,6 +891,7 @@ export async function runBuildLoop(
           buildId,
           model,
           cursorApiKey,
+          promptId: phaseResult.nextPrompt.id,
         };
         if (githubAuth) {
           if (githubAuth.gitHubToken) executeArgs.gitHubToken = githubAuth.gitHubToken;
