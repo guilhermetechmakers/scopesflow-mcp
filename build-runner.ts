@@ -49,7 +49,7 @@ export interface BuildExecutePromptArgs {
   userId?: string;
   /** When set, the MCP server can append to build_logs for this build in realtime. */
   buildId?: string;
-  /** Model to use for cursor-agent (defaults to "opus-4.6" if not provided). */
+  /** Model to use for cursor-agent (defaults to "composer-1.5" if not provided). */
   model?: string;
   /** Per-user Cursor API key (passed to cursor-agent via CURSOR_API_KEY env var). */
   cursorApiKey?: string;
