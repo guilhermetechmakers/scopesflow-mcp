@@ -124,6 +124,7 @@ export interface AutomatedBuildRow {
   id: string;
   user_id: string;
   status: string;
+  current_agent_phase?: string;
   progress?: number;
   /** Path to the project directory (set after create-project, used for resume). */
   cursor_project_path?: string | null;
@@ -323,6 +324,7 @@ export async function runBuildLoop(
   }
 
   const row = buildRow as AutomatedBuildRow;
+  const currentAgentPhase = row.current_agent_phase ?? 'developer';
   const configuration = row.configuration;
   const cursorConfig = configuration?.cursorConfig;
 
@@ -442,18 +444,23 @@ export async function runBuildLoop(
     }
   }
   if (promptQueue.length === 0) {
-    if (isResume) {
-      await appendLog('All prompts already implemented. Awaiting ScopesFlow to finalize.');
-      await updateStatus('prompts_completed', 100);
+    if (currentAgentPhase === 'developer') {
+      if (isResume) {
+        await appendLog('All prompts already implemented. Awaiting ScopesFlow to finalize.');
+        await updateStatus('prompts_completed', 100);
+        return;
+      }
+      const message = `No prompts found for build ${buildId}. Checked configuration.prompts and flowchart_items.`;
+      log(message, 'error');
+      await appendLog(message, 'error');
+      await updateStatus('failed');
       return;
     }
-    const message = `No prompts found for build ${buildId}. Checked configuration.prompts and flowchart_items.`;
-    log(message, 'error');
-    await appendLog(message, 'error');
-    await updateStatus('failed');
-    return;
+    await appendLog(`No prompts found; continuing with ${currentAgentPhase} phase pipeline.`);
   }
-  await appendLog(`Loaded ${promptQueue.length} prompts from ${promptSource ?? 'unknown source'}`);
+  if (promptQueue.length > 0) {
+    await appendLog(`Loaded ${promptQueue.length} prompts from ${promptSource ?? 'unknown source'}`);
+  }
 
   const hasString = (value: unknown): value is string =>
     typeof value === 'string' && value.trim().length > 0;
@@ -552,10 +559,6 @@ export async function runBuildLoop(
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    const completedSteps = isResume ? (row.current_step ?? 0) : 0;
-    let totalSteps = completedSteps + promptQueue.length || 1;
-    let currentStep = completedSteps;
-
     // Derive projectId for tracker
     const projectId =
       (configuration as { projectId?: string; project_id?: string }).projectId ??
@@ -569,11 +572,29 @@ export async function runBuildLoop(
     const timeoutPerStep =
       ((configuration as { automationSettings?: { timeoutPerStep?: number } }).automationSettings?.timeoutPerStep) ?? 300000;
 
+    if (activeBuildTracker && !activeBuildTracker.has(buildId)) {
+      activeBuildTracker.set(buildId, {
+        buildId,
+        projectId,
+        projectName,
+        startedAt: new Date().toISOString(),
+        currentStep: row.current_step ?? 0,
+        totalSteps: row.total_steps ?? promptQueue.length,
+        status: 'running',
+        projectPath,
+      });
+    }
+
+    if (currentAgentPhase === 'developer') {
+      const completedSteps = isResume ? (row.current_step ?? 0) : 0;
+      let totalSteps = completedSteps + promptQueue.length || 1;
+      let currentStep = completedSteps;
+
     await appendLog(`Starting prompt execution (${totalSteps} prompt${totalSteps === 1 ? '' : 's'})`);
 
     let isFirstPrompt = true;
 
-    while (promptQueue.length > 0) {
+      while (promptQueue.length > 0) {
       // ──── Check for custom prompts ────
       try {
         const { data: customPrompts } = await supabase
@@ -943,7 +964,13 @@ export async function runBuildLoop(
       }
     }
 
+    }
+
     // ══════ AGENT PIPELINE ORCHESTRATION ══════
+
+    const phaseOrder = ['developer', 'scope-check', 'design', 'debug'] as const;
+    const startIndex = phaseOrder.indexOf(currentAgentPhase as (typeof phaseOrder)[number]);
+    const normalizedStartIndex = startIndex === -1 ? 0 : startIndex;
 
     const agentOptions = {
       supabase,
@@ -958,33 +985,45 @@ export async function runBuildLoop(
     };
 
     // Phase 2: Scope-Check Agent
-    try {
-      await appendLog('Starting Scope-Check Agent phase...');
-      await runScopeCheckAgent(agentOptions);
-      await appendLog('Scope-Check Agent phase completed.');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await appendLog(`Scope-Check Agent failed: ${msg}`, 'error');
+    if (normalizedStartIndex <= 1) {
+      try {
+        await appendLog('Starting Scope-Check Agent phase...');
+        await runScopeCheckAgent(agentOptions);
+        await appendLog('Scope-Check Agent phase completed.');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await appendLog(`Scope-Check Agent failed: ${msg}`, 'error');
+      }
+    } else {
+      await appendLog(`Skipping Scope-Check Agent (current phase: ${currentAgentPhase})`);
     }
 
     // Phase 3: Design Agent
-    try {
-      await appendLog('Starting Design Agent phase...');
-      await runDesignAgent(agentOptions);
-      await appendLog('Design Agent phase completed.');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await appendLog(`Design Agent failed: ${msg}`, 'error');
+    if (normalizedStartIndex <= 2) {
+      try {
+        await appendLog('Starting Design Agent phase...');
+        await runDesignAgent(agentOptions);
+        await appendLog('Design Agent phase completed.');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await appendLog(`Design Agent failed: ${msg}`, 'error');
+      }
+    } else {
+      await appendLog(`Skipping Design Agent (current phase: ${currentAgentPhase})`);
     }
 
     // Phase 4: Debug Agent
-    try {
-      await appendLog('Starting Debug Agent phase...');
-      await runDebugAgent(agentOptions);
-      await appendLog('Debug Agent phase completed.');
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await appendLog(`Debug Agent failed: ${msg}`, 'error');
+    if (normalizedStartIndex <= 3) {
+      try {
+        await appendLog('Starting Debug Agent phase...');
+        await runDebugAgent(agentOptions);
+        await appendLog('Debug Agent phase completed.');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await appendLog(`Debug Agent failed: ${msg}`, 'error');
+      }
+    } else {
+      await appendLog(`Skipping Debug Agent (current phase: ${currentAgentPhase})`);
     }
 
     // ══════ ALL PHASES COMPLETE ══════

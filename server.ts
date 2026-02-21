@@ -5902,6 +5902,11 @@ module.exports = {
               res.end(JSON.stringify({ error: `Missing required fields: ${missing.join(', ')}` }));
               return;
             }
+            if (this.activeBuildTracker.has(buildId)) {
+              res.writeHead(200, cors);
+              res.end(JSON.stringify({ started: false, alreadyRunning: true, buildId }));
+              return;
+            }
             const serviceRoleKey = supabaseServiceRoleKey || process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
             this.runBuild(buildId, supabaseUrl, accessToken, anonKey, serviceRoleKey || undefined)
               .then((result) => {
