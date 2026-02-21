@@ -3529,6 +3529,58 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       let timedOut = false;
       const logs: Array<{ timestamp: string; type: string; message: string; data?: any }> = [];
       const startTime = Date.now();
+      let assistantBuffer = '';
+      let assistantChunkCount = 0;
+      let assistantLastElapsed: string | undefined;
+
+      const extractAssistantText = (payload: any): string => {
+        if (!payload || typeof payload !== 'object') return '';
+        const message = payload.message;
+        if (message && typeof message === 'object') {
+          const content = (message as any).content;
+          if (typeof content === 'string') return content;
+          if (Array.isArray(content)) {
+            return content
+              .map((item: any) => (typeof item?.text === 'string' ? item.text : ''))
+              .join('');
+          }
+        }
+        if (typeof payload.content === 'string') return payload.content;
+        if (typeof payload.text === 'string') return payload.text;
+        if (typeof payload.delta === 'string') return payload.delta;
+        return '';
+      };
+
+      const normalizeAssistantText = (text: string): string =>
+        text.replace(/\r\n/g, '\n').trim();
+
+      const compactForBuildLog = (text: string): string =>
+        text.replace(/\s+/g, ' ').trim();
+
+      const appendAssistantChunk = (text: string, elapsed?: string) => {
+        if (!text) return;
+        const normalized = text.replace(/\r\n/g, '\n');
+        if (!normalized) return;
+        assistantBuffer = assistantBuffer ? `${assistantBuffer}${normalized}` : normalized;
+        assistantChunkCount += 1;
+        if (elapsed) assistantLastElapsed = elapsed;
+      };
+
+      const flushAssistantBuffer = (elapsed?: string) => {
+        if (!assistantBuffer) return;
+        const normalized = normalizeAssistantText(assistantBuffer);
+        if (!normalized) {
+          assistantBuffer = '';
+          assistantChunkCount = 0;
+          assistantLastElapsed = undefined;
+          return;
+        }
+        const data = { elapsed: elapsed || assistantLastElapsed, chunks: assistantChunkCount };
+        addLog('agent_assistant', normalized, data);
+        assistantBuffer = '';
+        assistantChunkCount = 0;
+        assistantLastElapsed = undefined;
+      };
       
       // Helper to add log entry and optionally stream to build_logs
       const addLog = (type: string, message: string, data?: any) => {
@@ -3540,7 +3592,8 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         });
         if (onBuildLog) {
           const level = type === 'agent_error' || type === 'warning' ? 'error' : 'info';
-          const line = `[Agent] ${type}: ${message}`.substring(0, 500);
+          const safeMessage = type === 'agent_assistant' ? compactForBuildLog(message) : message;
+          const line = `[Agent] ${type}: ${safeMessage}`.substring(0, 500);
           Promise.resolve(onBuildLog(line, level)).catch(() => {});
         }
       };
@@ -3630,44 +3683,51 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
             
             // Log different event types with appropriate formatting
             if (jsonData.type === 'status') {
+              flushAssistantBuffer(elapsed);
               const msg = jsonData.message || JSON.stringify(jsonData);
               console.log(`[Cursor Agent] Status: ${msg}`);
               addLog('agent_status', msg, { elapsed, raw: jsonData });
             } else if (jsonData.type === 'file_change' || jsonData.type === 'file') {
+              flushAssistantBuffer(elapsed);
               const path = jsonData.path || jsonData.file || JSON.stringify(jsonData);
               console.log(`[Cursor Agent] File: ${path}`);
               addLog('agent_file', `File modified: ${path}`, { elapsed, path, raw: jsonData });
             } else if (jsonData.type === 'thinking' || jsonData.type === 'thought') {
+              flushAssistantBuffer(elapsed);
               const thought = jsonData.content || jsonData.message || '...';
               console.log(`[Cursor Agent] Thinking: ${thought}`);
               addLog('agent_thinking', thought, { elapsed, raw: jsonData });
             } else if (jsonData.type === 'error') {
+              flushAssistantBuffer(elapsed);
               const errMsg = jsonData.message || JSON.stringify(jsonData);
               console.error(`[Cursor Agent] Error: ${errMsg}`);
               addLog('agent_error', errMsg, { elapsed, raw: jsonData });
             } else if (jsonData.type === 'completion' || jsonData.type === 'done') {
+              flushAssistantBuffer(elapsed);
               const msg = jsonData.message || 'Done';
               console.log(`[Cursor Agent] Completed: ${msg}`);
               addLog('agent_completion', msg, { elapsed, raw: jsonData });
             } else if (jsonData.type === 'delta' || jsonData.type === 'text_delta') {
-              // Text deltas - log without newline if possible (accumulate)
+              // Text deltas - accumulate for a single assistant log
               const deltaText = jsonData.content || jsonData.text || jsonData.delta || '';
               if (deltaText) {
                 process.stdout.write(deltaText);
-                addLog('agent_delta', deltaText, { elapsed, raw: jsonData });
+                appendAssistantChunk(deltaText, elapsed);
               }
             } else if (jsonData.type === 'tool_call') {
+              flushAssistantBuffer(elapsed);
               // Capture tool calls (important for debugging)
               const toolInfo = JSON.stringify(jsonData).substring(0, 200);
               console.log(`[Cursor Agent] Tool Call: ${toolInfo}`);
               addLog('agent_tool_call', toolInfo, { elapsed, raw: jsonData });
             } else if (jsonData.type === 'assistant') {
-              // Capture assistant messages
-              const content = jsonData.message?.content || jsonData.content || '';
-              const preview = typeof content === 'string' ? content.substring(0, 100) : JSON.stringify(content).substring(0, 100);
+              // Capture assistant messages (aggregate chunks)
+              const content = extractAssistantText(jsonData);
+              const preview = (typeof content === 'string' ? content : '').substring(0, 100);
               console.log(`[Cursor Agent] Assistant: ${preview}`);
-              addLog('agent_assistant', preview, { elapsed, raw: jsonData });
+              appendAssistantChunk(content, elapsed);
             } else {
+              flushAssistantBuffer(elapsed);
               // Log any other event types
               const eventInfo = JSON.stringify(jsonData).substring(0, 200);
               console.log(`[Cursor Agent] ${jsonData.type || 'Event'}: ${eventInfo}`);
@@ -3676,6 +3736,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           } catch (parseError) {
             // Not JSON or malformed - log as plain text
             if (line.trim()) {
+              flushAssistantBuffer();
               console.log(`[Cursor Agent] ${line}`);
               addLog('agent_output', line);
             }
@@ -3691,6 +3752,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         // Log stderr in real-time too
         const lines = text.split('\n').filter(l => l.trim());
         for (const line of lines) {
+          flushAssistantBuffer();
           console.error(`[Cursor Agent] stderr: ${line}`);
           addLog('agent_stderr', line);
         }
@@ -3700,6 +3762,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       childProcess.on('close', (code, signal) => {
         clearTimeout(timeoutHandle);
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        flushAssistantBuffer(elapsed);
         
         // Process any remaining buffer
         if (stdoutBuffer.trim()) {
