@@ -49,18 +49,30 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
   const designSystem = project?.ui_style_description ?? '';
 
   // Check for existing design issues (e.g. after pause/resume) — skip audit and continue fixing
-  const { count: existingCount } = await supabase
+  const { data: existingIssues } = await supabase
     .from('design_audit_results')
-    .select('*', { count: 'exact', head: true })
-    .eq('build_id', buildId);
+    .select('id, build_id')
+    .eq('project_id', projectId)
+    .in('status', ['found', 'fixing']);
 
-  const hasExistingIssues = (existingCount ?? 0) > 0;
+  const hasExistingIssues = (existingIssues?.length ?? 0) > 0;
 
   let totalIssues: number;
 
   if (hasExistingIssues) {
-    totalIssues = existingCount ?? 0;
+    totalIssues = existingIssues?.length ?? 0;
     log(`Resuming design phase: ${totalIssues} existing issues found, skipping audit.`);
+
+    // Attach existing issues to this build for visibility in the dashboard
+    const staleIssueIds = (existingIssues ?? [])
+      .filter((issue) => issue.build_id !== buildId)
+      .map((issue) => issue.id);
+    if (staleIssueIds.length > 0) {
+      await supabase
+        .from('design_audit_results')
+        .update({ build_id: buildId })
+        .in('id', staleIssueIds);
+    }
   } else {
     const filesToAudit: string[] = [];
     const srcPath = path.join(projectPath, 'src');
@@ -91,6 +103,18 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
 
     for (const filePath of filesToAudit) {
       const relativePath = path.relative(projectPath, filePath).replace(/\\/g, '/');
+
+      const { count: existingForFile } = await supabase
+        .from('design_audit_results')
+        .select('*', { count: 'exact', head: true })
+        .eq('project_id', projectId)
+        .eq('file_path', relativePath)
+        .in('status', ['found', 'fixing']);
+
+      if ((existingForFile ?? 0) > 0) {
+        log(`Skipping audit for ${relativePath} — existing issues already tracked`);
+        continue;
+      }
 
       try {
         const content = await fs.readFile(filePath, 'utf-8');
@@ -132,7 +156,7 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
   const { data: issues } = await supabase
     .from('design_audit_results')
     .select('*')
-    .eq('build_id', buildId)
+    .eq('project_id', projectId)
     .eq('status', 'found')
     .order('severity', { ascending: true });
 

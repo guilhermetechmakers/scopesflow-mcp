@@ -5970,8 +5970,9 @@ module.exports = {
             .from('automated_builds')
             .select(`
               id, current_agent_phase,
-              developer_completed_at, design_completed_at, debug_completed_at,
+              developer_completed_at, scope_check_completed_at, design_completed_at, debug_completed_at,
               developer_completion_pct,
+              scope_check_pages_total, scope_check_pages_completed,
               design_issues_found, design_issues_fixed,
               debug_issues_found, debug_issues_fixed,
               agent_loop_count
@@ -5994,6 +5995,12 @@ module.exports = {
                 completionPct: data.developer_completion_pct,
                 completedAt: data.developer_completed_at,
                 loopCount: data.agent_loop_count,
+              },
+              'scope-check': {
+                status: data.scope_check_completed_at ? 'completed' : data.current_agent_phase === 'scope-check' ? 'running' : 'pending',
+                pagesTotal: data.scope_check_pages_total,
+                pagesCompleted: data.scope_check_pages_completed,
+                completedAt: data.scope_check_completed_at,
               },
               design: {
                 status: data.design_completed_at ? 'completed' : data.current_agent_phase === 'design' ? 'running' : 'pending',

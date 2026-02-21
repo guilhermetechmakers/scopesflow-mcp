@@ -3,6 +3,7 @@ import { access } from 'fs/promises';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { runDesignAgent } from './design-agent-runner.js';
 import { runDebugAgent } from './debug-agent-runner.js';
+import { runScopeCheckAgent } from './scope-check-agent-runner.js';
 
 /** Config passed to create-project (matches server CursorProjectConfig shape). */
 export interface BuildCursorConfig {
@@ -776,8 +777,11 @@ export async function runBuildLoop(
     const COMPLETION_THRESHOLD = 90;
     const MAX_AGENT_LOOPS = 50;
     const MAX_CONSECUTIVE_ERRORS = 3;
+    const MAX_NO_PROMPT_RETRIES = 3;
+    const NO_PROMPT_RETRY_DELAY_MS = 10000;
     let agentLoopCount = 0;
     let consecutiveErrors = 0;
+    let noPromptRetries = 0;
 
     await appendLog('Initial prompt queue exhausted. Entering Developer Agent loop...');
 
@@ -805,6 +809,7 @@ export async function runBuildLoop(
         completionPct: number;
         phaseComplete: boolean;
         nextPrompt?: { id: string; prompt_content: string; title: string; source: string; type: string };
+        shouldRetry?: boolean;
         error?: string;
       };
 
@@ -851,6 +856,7 @@ export async function runBuildLoop(
       }
 
       if (phaseResult.nextPrompt) {
+        noPromptRetries = 0;
         currentStep++;
         totalSteps++;
 
@@ -918,7 +924,21 @@ export async function runBuildLoop(
         const progress = Math.round((currentStep / totalSteps) * 100);
         await updateStatus('running', Math.min(progress, 89), currentStep);
       } else {
-        await appendLog('No more prompts could be generated. Ending developer loop.');
+        const shouldRetry =
+          phaseResult.shouldRetry === true ||
+          (phaseResult.completionPct < COMPLETION_THRESHOLD);
+
+        if (shouldRetry && noPromptRetries < MAX_NO_PROMPT_RETRIES) {
+          noPromptRetries++;
+          const errorDetail = phaseResult.error ? ` (${phaseResult.error})` : '';
+          await appendLog(
+            `No prompt generated${errorDetail}. Retrying (${noPromptRetries}/${MAX_NO_PROMPT_RETRIES})...`
+          );
+          await new Promise(r => setTimeout(r, NO_PROMPT_RETRY_DELAY_MS));
+          continue;
+        }
+
+        await appendLog('No more prompts could be generated after retries. Ending developer loop.');
         break;
       }
     }
@@ -937,7 +957,17 @@ export async function runBuildLoop(
       userId: row.user_id,
     };
 
-    // Phase 2: Design Agent
+    // Phase 2: Scope-Check Agent
+    try {
+      await appendLog('Starting Scope-Check Agent phase...');
+      await runScopeCheckAgent(agentOptions);
+      await appendLog('Scope-Check Agent phase completed.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await appendLog(`Scope-Check Agent failed: ${msg}`, 'error');
+    }
+
+    // Phase 3: Design Agent
     try {
       await appendLog('Starting Design Agent phase...');
       await runDesignAgent(agentOptions);
@@ -947,7 +977,7 @@ export async function runBuildLoop(
       await appendLog(`Design Agent failed: ${msg}`, 'error');
     }
 
-    // Phase 3: Debug Agent
+    // Phase 4: Debug Agent
     try {
       await appendLog('Starting Debug Agent phase...');
       await runDebugAgent(agentOptions);
