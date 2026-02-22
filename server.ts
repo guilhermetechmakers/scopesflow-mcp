@@ -124,6 +124,7 @@ class CursorMCPServer {
 
   // Dashboard support
   private activeBuildTracker = new Map<string, ActiveBuildEntry>();
+  private stopRequests = new Set<string>();
   private appRunner = new AppRunner(process.env.MCP_SERVER_HOST || 'localhost');
   private buildOrchestrator = new BuildOrchestrator();
 
@@ -5505,6 +5506,8 @@ module.exports = {
     anonKey: string,
     supabaseServiceRoleKey?: string
   ): Promise<{ sessionPid?: number }> {
+    this.stopRequests.delete(buildId);
+    const shouldStop = () => this.stopRequests.has(buildId);
     const useWorkers = process.env.MCP_USE_BUILD_WORKERS === 'true';
 
     if (useWorkers) {
@@ -5534,8 +5537,11 @@ module.exports = {
         createProjectFn,
         executePromptFn,
         activeBuildTracker: this.activeBuildTracker,
+        shouldStop,
       }).catch((err) => {
         console.error('[MCP Server] runBuildFromPayload error:', err);
+      }).finally(() => {
+        this.stopRequests.delete(buildId);
       });
     });
 
@@ -6164,26 +6170,31 @@ module.exports = {
         try {
           const stopped = await this.buildOrchestrator.stopWorker(targetBuildId);
           if (!stopped) {
-            res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
-            res.end(JSON.stringify({ error: 'Session not found' }));
-            return;
+            if (this.activeBuildTracker.has(targetBuildId)) {
+              this.stopRequests.add(targetBuildId);
+            } else {
+              res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: 'Session not found' }));
+              return;
+            }
           }
-          // Update build status in DB if we have service role key
+          // Log stop request in DB if we have service role key
           const serviceKey = process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
           const sbUrl = process.env.SUPABASE_URL?.trim();
           if (serviceKey && sbUrl) {
             try {
               const db = createClient(sbUrl, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
-              await db.from('automated_builds').update({ status: 'canceled', updated_at: new Date().toISOString() }).eq('id', targetBuildId);
               await db.from('build_logs').insert({
                 build_id: targetBuildId,
                 log_type: 'build_log',
-                message: 'Build canceled via /api/sessions/:buildId/stop',
+                message: 'Build runner stop requested via /api/sessions/:buildId/stop',
                 created_at: new Date().toISOString(),
               });
             } catch { /* non-blocking */ }
           }
-          this.activeBuildTracker.delete(targetBuildId);
+          if (stopped) {
+            this.activeBuildTracker.delete(targetBuildId);
+          }
           res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
           res.end(JSON.stringify({ stopped: true, buildId: targetBuildId }));
         } catch (e) {

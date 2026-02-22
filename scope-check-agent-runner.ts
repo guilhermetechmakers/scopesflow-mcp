@@ -11,6 +11,7 @@ interface ScopeCheckAgentOptions {
   cursorApiKey?: string;
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
+  shouldStop?: () => boolean;
 }
 
 interface GeneratePagePromptResponse {
@@ -26,7 +27,7 @@ interface GeneratePagePromptResponse {
 export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
-    executePromptFn, model, cursorApiKey, githubAuth, userId,
+    executePromptFn, model, cursorApiKey, githubAuth, userId, shouldStop,
   } = options;
 
   const log = (msg: string) => {
@@ -40,6 +41,11 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
   };
 
   log('Scope-Check Agent starting...');
+
+  if (shouldStop?.()) {
+    log('Stop requested; exiting scope-check phase.');
+    return;
+  }
 
   await supabase.from('automated_builds').update({
     current_agent_phase: 'scope-check',
@@ -71,6 +77,10 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
   let completedPages = 0;
 
   for (const page of pages) {
+    if (shouldStop?.()) {
+      log('Stop requested; exiting scope-check phase.');
+      return;
+    }
     const { data: buildCheck } = await supabase
       .from('automated_builds')
       .select('status')
@@ -166,6 +176,11 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
     }).eq('id', buildId);
 
     log(`${page.title}: ${result ? 'completed' : 'failed'} (${completedPages}/${pages.length})`);
+  }
+
+  if (shouldStop?.()) {
+    log('Stop requested; exiting scope-check phase.');
+    return;
   }
 
   await supabase.from('automated_builds').update({

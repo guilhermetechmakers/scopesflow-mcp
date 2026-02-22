@@ -104,6 +104,8 @@ export interface RunBuildLoopOptions {
   activeBuildTracker?: Map<string, ActiveBuildEntry>;
   /** Per-user Cursor API key (fetched once at build start, passed to every prompt execution). */
   cursorApiKey?: string;
+  /** Optional stop signal for in-process builds. */
+  shouldStop?: () => boolean;
 }
 
 export interface RunBuildFromPayloadOptions {
@@ -117,6 +119,8 @@ export interface RunBuildFromPayloadOptions {
   executePromptFn: ExecutePromptFn;
   /** Shared in-memory build tracker (updated by the loop, read by HTTP endpoints). */
   activeBuildTracker?: Map<string, ActiveBuildEntry>;
+  /** Optional stop signal for in-process builds. */
+  shouldStop?: () => boolean;
 }
 
 /** Row from automated_builds (expected columns). */
@@ -160,7 +164,7 @@ export async function runBuildLoop(
   buildId: string,
   options: RunBuildLoopOptions
 ): Promise<void> {
-  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker, cursorApiKey } = options;
+  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker, cursorApiKey, shouldStop } = options;
 
   const log = (message: string, level: 'info' | 'error' = 'info') => {
     console.error(`[BuildRunner] ${message}`);
@@ -310,6 +314,15 @@ export async function runBuildLoop(
     }
   };
 
+  const stopIfRequested = async (context: string): Promise<boolean> => {
+    if (!shouldStop || !shouldStop()) return false;
+    await appendLog(`Stop requested; exiting ${context}.`, 'info');
+    if (activeBuildTracker) {
+      activeBuildTracker.delete(buildId);
+    }
+    return true;
+  };
+
   const { data: buildRow, error: fetchError } = await supabase
     .from('automated_builds')
     .select('*')
@@ -324,6 +337,7 @@ export async function runBuildLoop(
   }
 
   const row = buildRow as AutomatedBuildRow;
+  if (await stopIfRequested('build runner')) return;
   const currentAgentPhase = row.current_agent_phase ?? 'developer';
   const configuration = row.configuration;
   const cursorConfig = configuration?.cursorConfig;
@@ -595,6 +609,7 @@ export async function runBuildLoop(
     let isFirstPrompt = true;
 
       while (promptQueue.length > 0) {
+      if (await stopIfRequested('developer prompt loop')) return;
       // ──── Check for custom prompts ────
       try {
         const { data: customPrompts } = await supabase
@@ -789,6 +804,7 @@ export async function runBuildLoop(
           projectPath,
         });
       }
+      if (await stopIfRequested('developer prompt loop')) return;
     }
 
     // ══════ DEVELOPER AGENT CONTINUOUS LOOP ══════
@@ -807,6 +823,7 @@ export async function runBuildLoop(
     await appendLog('Initial prompt queue exhausted. Entering Developer Agent loop...');
 
     while (agentLoopCount < MAX_AGENT_LOOPS) {
+      if (await stopIfRequested('developer agent loop')) return;
       agentLoopCount++;
       consecutiveErrors = 0;
 
@@ -982,10 +999,12 @@ export async function runBuildLoop(
       cursorApiKey,
       githubAuth,
       userId: row.user_id,
+      shouldStop,
     };
 
     // Phase 2: Scope-Check Agent
     if (normalizedStartIndex <= 1) {
+      if (await stopIfRequested('scope-check phase')) return;
       try {
         await appendLog('Starting Scope-Check Agent phase...');
         await runScopeCheckAgent(agentOptions);
@@ -1000,6 +1019,7 @@ export async function runBuildLoop(
 
     // Phase 3: Design Agent
     if (normalizedStartIndex <= 2) {
+      if (await stopIfRequested('design phase')) return;
       try {
         await appendLog('Starting Design Agent phase...');
         await runDesignAgent(agentOptions);
@@ -1014,6 +1034,7 @@ export async function runBuildLoop(
 
     // Phase 4: Debug Agent
     if (normalizedStartIndex <= 3) {
+      if (await stopIfRequested('debug phase')) return;
       try {
         await appendLog('Starting Debug Agent phase...');
         await runDebugAgent(agentOptions);
@@ -1053,7 +1074,7 @@ export async function runBuildLoop(
  * then run the build loop with config overrides.
  */
 export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): Promise<void> {
-  const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, createProjectFn, executePromptFn, activeBuildTracker } = options;
+  const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, createProjectFn, executePromptFn, activeBuildTracker, shouldStop } = options;
 
   const supabaseUser: SupabaseClient = createClient(supabaseUrl, anonKey, {
     global: { headers: { Authorization: `Bearer ${accessToken}` } },
@@ -1192,5 +1213,6 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
     },
     activeBuildTracker,
     cursorApiKey,
+    shouldStop,
   });
 }

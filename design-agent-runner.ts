@@ -16,12 +16,13 @@ interface DesignAgentOptions {
   cursorApiKey?: string;
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
+  shouldStop?: () => boolean;
 }
 
 export async function runDesignAgent(options: DesignAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
-    executePromptFn, model, cursorApiKey, githubAuth, userId,
+    executePromptFn, model, cursorApiKey, githubAuth, userId, shouldStop,
   } = options;
 
   const log = (msg: string) => {
@@ -35,6 +36,14 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
   };
 
   log('Design Agent starting...');
+
+  const stopIfRequested = (context: string): boolean => {
+    if (!shouldStop?.()) return false;
+    log(`Stop requested; exiting design phase (${context}).`);
+    return true;
+  };
+
+  if (stopIfRequested('startup')) return;
 
   await supabase.from('automated_builds').update({
     current_agent_phase: 'design',
@@ -102,6 +111,7 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
     totalIssues = 0;
 
     for (const filePath of filesToAudit) {
+      if (stopIfRequested('audit loop')) return;
       const relativePath = path.relative(projectPath, filePath).replace(/\\/g, '/');
 
       const { count: existingForFile } = await supabase
@@ -172,6 +182,7 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
     }
 
     for (const [filePath, fileIssues] of Object.entries(byFile)) {
+      if (stopIfRequested('fix loop')) return;
       if (fixPromptCount >= MAX_DESIGN_FIX_PROMPTS) break;
       fixPromptCount++;
 
@@ -239,6 +250,8 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
       log(`Fixed ${fileIssues.length} issues in ${filePath}`);
     }
   }
+
+  if (stopIfRequested('finalize')) return;
 
   await supabase.from('automated_builds').update({
     design_issues_fixed: fixedCount,

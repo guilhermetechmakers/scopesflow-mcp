@@ -21,6 +21,7 @@ interface DebugAgentOptions {
   cursorApiKey?: string;
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
+  shouldStop?: () => boolean;
 }
 
 interface FoundIssue {
@@ -34,7 +35,7 @@ interface FoundIssue {
 export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
-    executePromptFn, model, cursorApiKey, githubAuth, userId,
+    executePromptFn, model, cursorApiKey, githubAuth, userId, shouldStop,
   } = options;
 
   const log = (msg: string) => {
@@ -49,6 +50,16 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
 
   log('Debug Agent starting...');
 
+  const stopIfRequested = (context: string): boolean => {
+    if (!shouldStop?.()) return false;
+    log(`Stop requested; exiting debug phase (${context}).`);
+    return true;
+  };
+
+  if (stopIfRequested('startup')) return;
+
+  if (stopIfRequested('finalize')) return;
+
   await supabase.from('automated_builds').update({
     current_agent_phase: 'debug',
   }).eq('id', buildId);
@@ -58,6 +69,7 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
   let totalFixed = 0;
 
   while (cycle < MAX_DEBUG_CYCLES) {
+    if (stopIfRequested('cycle loop')) return;
     cycle++;
     log(`Debug cycle ${cycle}/${MAX_DEBUG_CYCLES}`);
 
@@ -215,6 +227,8 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
     if (githubAuth?.gitUserEmail) args.gitUserEmail = githubAuth.gitUserEmail;
 
     await executePromptFn(args);
+
+    if (stopIfRequested('post-fix')) return;
 
     if (stepRowId) {
       try {
