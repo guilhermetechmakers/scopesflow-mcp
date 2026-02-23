@@ -1,4 +1,4 @@
-﻿import { SupabaseClient } from '@supabase/supabase-js';
+import { SupabaseClient } from '@supabase/supabase-js';
 import type { ExecutePromptFn, BuildExecutePromptArgs } from './build-runner.js';
 
 interface ScopeCheckAgentOptions {
@@ -30,11 +30,13 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
     executePromptFn, model, cursorApiKey, githubAuth, userId, shouldStop,
   } = options;
 
-  const log = (msg: string) => {
+  const log = (msg: string, level: 'info' | 'warn' | 'error' = 'info') => {
     console.error(`[ScopeCheckAgent] ${msg}`);
     supabase.from('build_logs').insert({
       build_id: buildId,
       log_type: 'build_log',
+      source: 'scope-check',
+      level,
       message: msg,
       created_at: new Date().toISOString(),
     }).then(() => {});
@@ -100,7 +102,7 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
     );
 
     if (promptErr || !promptResult?.success) {
-      log(`Failed to generate prompt for ${page.title}: ${promptErr?.message ?? promptResult?.error ?? 'unknown error'}`);
+      log(`Failed to generate prompt for ${page.title}: ${promptErr?.message ?? promptResult?.error ?? 'unknown error'}`, 'error');
       continue;
     }
 
@@ -119,7 +121,7 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
     const promptId = typedPromptResult.promptNode?.id ?? null;
 
     if (!promptContent || !promptId) {
-      log(`Prompt generation returned empty content for ${page.title}. Skipping.`);
+      log(`Prompt generation returned empty content for ${page.title}. Skipping.`, 'warn');
       continue;
     }
 

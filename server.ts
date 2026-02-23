@@ -58,7 +58,7 @@ interface ExecutePromptArgs {
   supabaseClient?: SupabaseClient; // NEW: Optional Supabase client for fetching GitHub auth
   userId?: string;           // NEW: Optional user ID for fetching GitHub auth
   buildId?: string;          // NEW: When set, server appends to build_logs for realtime following
-  model?: string;            // NEW: Model to use for cursor-agent (defaults to "composer-1.5")
+  model?: string;            // NEW: Model to use for cursor-agent (defaults to "auto")
   cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
   promptId?: string;         // NEW: Flowchart prompt ID — included in mcp_log for correct marking on completion
 }
@@ -375,6 +375,8 @@ Ensure all implementations align with this pattern's best practices.
 - **HTTP Client:** Native fetch or Axios
 - **Navigation:** React Navigation (if needed)
 - **Notifications:** Expo Notifications
+- **Backend:** Supabase (Auth, Database, Storage, Realtime)
+- **Serverless Functions:** Supabase Edge Functions (Deno runtime)
 
 ## Critical Setup Rules
 
@@ -386,6 +388,8 @@ Ensure all implementations align with this pattern's best practices.
 6. Handle safe areas for iOS and Android
 7. Use Platform.select() for platform-specific code
 8. Environment variables must use EXPO_PUBLIC_ prefix
+9. **Every project uses Supabase as the backend.** Initialize the Supabase client in a central \`src/lib/supabase.ts\` file
+10. Prefer Supabase Edge Functions (Deno) over custom API routes for server-side logic
 `;
       } else {
       rulesContent += `## Tech Stack Requirements
@@ -400,6 +404,8 @@ Ensure all implementations align with this pattern's best practices.
 - **Forms:** React Hook Form with Zod validation
 - **HTTP Client:** Axios
 - **Notifications:** Sonner
+- **Backend:** Supabase (Auth, Database, Storage, Realtime)
+- **Serverless Functions:** Supabase Edge Functions (Deno runtime)
 
 ## Critical Setup Rules
 
@@ -409,6 +415,8 @@ Ensure all implementations align with this pattern's best practices.
 4. Use Tailwind v3 with tailwind.config.js (not CSS-based config)
 5. Use \`@/\` path aliases for imports
 6. Use Shadcn components instead of custom UI components
+7. **Every project uses Supabase as the backend.** Initialize the Supabase client in a central \`src/lib/supabase.ts\` file
+8. Prefer Supabase Edge Functions (Deno) over custom API routes for server-side logic
 `;
       }
 
@@ -429,6 +437,40 @@ ${isExpoProject ? '- Use native fetch() or Axios with proper error handling' : '
 ${isExpoProject ? '- Create custom hooks in \`src/hooks/\` for data fetching' : '- Create React Query hooks in \`src/hooks/\`'}
 - Implement proper error handling${isExpoProject ? ' with user-friendly error messages' : ' with toast notifications'}
 - Use TypeScript types for all API responses
+
+## Supabase Integration
+
+### Client Setup
+- Initialize the Supabase client in a central file (\`src/lib/supabase.ts\`)
+- Use \`createClient\` from \`@supabase/supabase-js\` with environment variables for URL and anon key
+- Never expose the service role key in client-side code
+- Use typed Supabase client with generated database types (\`supabase gen types typescript\`)
+
+### Edge Functions (Preferred for Server-Side Logic)
+- Use Supabase Edge Functions (Deno runtime) instead of custom API routes whenever possible
+- Edge Functions run on Deno Deploy — use \`Deno.serve()\` and import from \`https://esm.sh/\` or npm specifiers
+- Place Edge Functions in \`supabase/functions/<function-name>/index.ts\`
+- Use \`supabase functions serve\` for local development and \`supabase functions deploy\` for production
+- Edge Functions have access to \`Deno.env.get()\` for secrets — store secrets via \`supabase secrets set\`
+- Use Edge Functions for: webhooks, third-party API calls, data processing, scheduled tasks, and any logic that should not run on the client
+
+### Authentication
+- Use Supabase Auth for all authentication flows (email/password, OAuth, magic link)
+- Implement Row-Level Security (RLS) policies on all tables — never rely solely on client-side auth checks
+- Use \`supabase.auth.getSession()\` and \`supabase.auth.onAuthStateChange()\` to manage session state
+- Protect routes and API calls by verifying the user session
+
+### Database & Realtime
+- Use Supabase's PostgreSQL database with typed queries
+- Define database schema with migrations (\`supabase migration new\`)
+- Use Supabase Realtime subscriptions to keep UI in sync with database changes where appropriate
+- Leverage Supabase Storage for file uploads (images, documents)
+
+### Security
+- Enable RLS on every table — no exceptions
+- Use \`auth.uid()\` in RLS policies to scope data access to the authenticated user
+- Validate all inputs with Zod before sending to Supabase
+- Never trust client-side data — validate and sanitize in Edge Functions
 
 ## Design System
 
@@ -453,10 +495,81 @@ ${designReferenceContent}
 - [ ] Used consistent spacing scale
 - [ ] Ensured accessibility (keyboard nav, ARIA, contrast)
 
-## Component Patterns
+## Component Patterns & Visual Design System
 
+**Don't design "component by component." Design with a small visual system (radius, shadow, border, spacing, states, tokens).**
+
+### 1. Radius Scale (Not Random Corner Values)
+- 2px: tiny elements (badges, checkboxes)
+- 4–6px: inputs, buttons
+- 8–12px: cards, menus, modals
+- 999px / 50%: pills, avatars
+
+### 2. Shadows as Elevation (Not Decoration)
+- Flat content = no shadow (use border/spacing)
+- Movable cards / hover surfaces = light shadow
+- Menus / popovers / dialogs = stronger overlay shadow
+- Use a few clear elevation levels: base (0), raised card (1), overlay/modal (2–3)
+
+### 3. Dark Mode: Shadows Are Not Enough
+- Use surface color shifts + shadow (higher surfaces are lighter in dark mode)
+- Don't reuse the exact same light-mode shadow recipe in dark mode
+- Pair raised/overlay levels with both surface color changes and shadows
+
+### 4. Borders for Structure (Subtle Strokes > Heavy Shadows)
+- Card: soft surface + 1px border
+- Active tab / selected item: 2px accent border
+- Focus: visible ring (not just color shift)
+- Use 1px default borders and 2px for selected/focus indicators
+
+### 5. Focus Rings Aligned with Component Radius
+- Focus ring offset = 2px
+- Focus ring radius = component radius + 2px
+- Keep focus states visually aligned with the component shape
+
+### 6. Spacing on a Token Scale (2/4/8 System)
+- Use a consistent scale: 4px / 8px / 12px / 16px / 24px / 32px / 48px
+- Spacing tokens control both component internals and layout density
+- Spacing creates hierarchy and grouping (without extra borders/shadows)
+
+### 7. Design Tokens for Everything Visual
+- Never hardcode visual values — use semantic design tokens
+- Tokens for: color, radius, spacing, elevation, border
+- Enables easy theme changes, consistent UI across platforms, cleaner handoff
+- Semantic names: \`surface\`, \`surface-raised\`, \`border-default\`, \`radius-md\`, etc.
+
+### 8. Interaction States Must Be Obvious
+- Define every state: hover, pressed, selected, focused, disabled
+- Use one primary signal per state (color OR elevation OR border), not all at once
+- Don't overuse elevation transitions (avoid visual noise)
+
+### 9. Accessibility Is Part of Visual Design
+- Text contrast: 4.5:1 for normal text (WCAG)
+- Non-text contrast: 3:1 for controls, focus rings, icons
+- Clear focus visibility (Focus Not Obscured, WCAG 2.2)
+- Larger target sizes (minimum per WCAG 2.2)
+
+### 10. Blur/Glass Effects: Sparingly and Intentionally
+- Use backdrop-filter only for: overlays, command palettes, sticky bars, side panels
+- Not entire pages — keep contrast high
+- Controlled usage only
+
+### 11. Respect Reduced Motion
+- Use motion to support feedback and hierarchy only
+- Support \`prefers-reduced-motion\` — reduce or remove animation/transitions for users who request it
+
+### Modern Default Setup (Baseline)
+- **Radius:** 4 / 8 / 12 / full
+- **Border:** 1px neutral stroke, 2px for focus/selected
+- **Elevation:** 0 (base), 1 (raised card), 2 (popover), 3 (modal)
+- **Spacing:** 4/8-based scale
+- **States:** hover + pressed + focus defined for every interactive component
+- **Tokens:** semantic names (\`surface\`, \`surface-raised\`, \`border-default\`, \`radius-md\`, etc.)
+- **Dark mode:** separate surface/elevation values (not just inverted colors)
+
+### Component Implementation
 ${isExpoProject ? '- Use React Native components: View, Text, ScrollView, FlatList, etc.' : '- Wrap all pages with animation components'}
-- Use \`cn()\` utility for conditional classes (with NativeWind for mobile)
+- Use \`cn()\` utility for conditional classes${isExpoProject ? ' (with NativeWind for mobile)' : ''}
 ${isExpoProject ? '- Implement loading states with ActivityIndicator' : '- Implement loading skeletons (not spinners)'}
 - Create helpful empty states${isExpoProject ? ' with appropriate icons' : ' with illustrations'}
 - Add error boundaries for robust error handling
@@ -587,6 +700,8 @@ ${isExpoProject ? '- Expo CLI' : '- Vite + SWC'}
 ${isExpoProject ? '- NativeWind (Tailwind for React Native)' : '- Tailwind CSS v3'}
 ${isExpoProject ? '- React Native Components' : '- Shadcn/ui + Motion'}
 ${isExpoProject ? '- Native fetch/Axios' : '- React Query + Axios'}
+- Supabase (Auth, Database, Storage, Realtime)
+- Supabase Edge Functions (Deno runtime)
 
 ## Critical Rules
 1. Always run \`npm install\` before build commands
@@ -594,6 +709,27 @@ ${isExpoProject ? '2. Use NativeWind for styling' : '2. Use Motion library for a
 ${isExpoProject ? '3. Use React Native components (View, Text, etc.)' : '3. Import Inter font in CSS'}
 4. Use \`@/\` path aliases
 ${isExpoProject ? '5. Handle safe areas for iOS and Android' : '5. Follow mobile-first responsive design'}
+6. Every project uses Supabase — initialize client in \`src/lib/supabase.ts\`
+7. Prefer Supabase Edge Functions over custom API routes for server-side logic
+8. Enable RLS on every table — no exceptions
+
+## Supabase Integration
+- Use \`@supabase/supabase-js\` with typed client (generate types via \`supabase gen types typescript\`)
+- Use Edge Functions (\`supabase/functions/<name>/index.ts\`) for webhooks, third-party APIs, data processing
+- Use Supabase Auth for all auth flows; enforce RLS policies on all tables
+- Use \`auth.uid()\` in RLS policies to scope data to the authenticated user
+- Validate inputs with Zod before sending to Supabase
+
+## Component Patterns & Visual System
+- Design with a visual system: radius, shadow, border, spacing, states, tokens
+- Radius: 2px (badges) / 4-6px (inputs/buttons) / 8-12px (cards/modals) / 999px (pills)
+- Shadows as elevation: flat=none, raised card=light, overlay/modal=strong
+- Borders: 1px for structure, 2px for focus/selected, focus ring = component radius + 2px
+- Spacing: 4/8-based scale (4/8/12/16/24/32/48px)
+- Tokens for everything: \`surface\`, \`surface-raised\`, \`border-default\`, \`radius-md\`
+- Dark mode: separate surface/elevation values (not just inverted colors)
+- Define every state: hover, pressed, selected, focused, disabled
+- Accessibility: 4.5:1 text contrast, 3:1 non-text contrast, support prefers-reduced-motion
 
 ---
 
@@ -2252,14 +2388,14 @@ Analyze the existing project structure and implement the task following the patt
         
         // Use --print flag for non-interactive mode, --force to allow commands
         // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
-        const modelArg = args.model || 'composer-1.5';
+        const modelArg = args.model || 'auto';
         command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
       } else {
         // Save prompt to file for Unix-like systems too
         const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
         await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
         
-        const modelArg = args.model || 'composer-1.5';
+        const modelArg = args.model || 'auto';
         command = `cat .cursor-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
       }
       
@@ -3454,7 +3590,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const tempPromptFile = path.join(actualProjectPath, '.cursor-fix-prompt.tmp');
       await fs.writeFile(tempPromptFile, fixPrompt, 'utf-8');
       
-      const modelArg = model || 'composer-1.5';
+      const modelArg = model || 'auto';
       let command: string;
       if (isWindows) {
         const wslProjectPath = actualProjectPath
