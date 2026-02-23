@@ -472,6 +472,29 @@ ${isExpoProject ? '- Create custom hooks in \`src/hooks/\` for data fetching' : 
 - Validate all inputs with Zod before sending to Supabase
 - Never trust client-side data — validate and sanitize in Edge Functions
 
+## API Integrations
+
+**When building any third-party API integration, ALWAYS search the web for the latest official documentation first.** Do not rely on memorized or outdated API knowledge — APIs change frequently.
+
+### Rules for API Integrations
+1. **Search docs first:** Before writing any integration code, look up the current official API documentation, SDKs, and changelog for the service
+2. **Always use Edge Functions:** All API integrations with external services MUST be implemented as Supabase Edge Functions — never call third-party APIs directly from the client
+3. **Never expose API keys on the client:** Store all API keys and secrets using \`supabase secrets set\` and access them via \`Deno.env.get()\` inside Edge Functions
+4. **Use official SDKs when available:** Prefer the official SDK/client library for the service (import via \`npm:\` specifier or \`https://esm.sh/\` in Deno)
+5. **Handle rate limits and errors:** Implement retry logic with exponential backoff, respect rate limit headers, and return meaningful error responses to the client
+6. **Type all responses:** Define TypeScript interfaces for all external API request/response shapes
+7. **Validate payloads:** Use Zod to validate both incoming requests to the Edge Function and responses from the external API
+8. **Document the integration:** Add a brief comment at the top of each Edge Function describing which API it integrates with, the endpoint(s) used, and any required secrets
+
+### Edge Function Integration Pattern
+\`\`\`
+supabase/functions/<service-name>/index.ts   → the Edge Function entry point
+\`\`\`
+- Accept structured JSON from the client, validate with Zod
+- Call the external API using fetch or the official SDK
+- Transform and return the response
+- Log errors server-side, return safe error messages to the client
+
 ## Design System
 
 ${designPattern ? this.getDesignPatternGuidelines(designPattern, isExpoProject) : ''}
@@ -719,6 +742,14 @@ ${isExpoProject ? '5. Handle safe areas for iOS and Android' : '5. Follow mobile
 - Use Supabase Auth for all auth flows; enforce RLS policies on all tables
 - Use \`auth.uid()\` in RLS policies to scope data to the authenticated user
 - Validate inputs with Zod before sending to Supabase
+
+## API Integrations
+- **ALWAYS search the web for the latest official API documentation before building any integration** — never rely on outdated or memorized knowledge
+- All third-party API integrations MUST use Supabase Edge Functions — never call external APIs from the client
+- Store API keys via \`supabase secrets set\`, access with \`Deno.env.get()\` inside Edge Functions
+- Use official SDKs when available (import via \`npm:\` or \`https://esm.sh/\` in Deno)
+- Implement retry logic with exponential backoff and handle rate limits
+- Type all request/response shapes and validate with Zod
 
 ## Component Patterns & Visual System
 - Design with a visual system: radius, shadow, border, spacing, states, tokens
