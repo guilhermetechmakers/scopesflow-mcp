@@ -1,5 +1,6 @@
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
+import * as http from 'http';
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { ExecutePromptFn, BuildExecutePromptArgs } from './build-runner.js';
 
@@ -10,6 +11,21 @@ const MAX_ISSUES_PER_PROMPT = 30;
 const BUILD_TIMEOUT_MS = 120_000;
 const TSC_TIMEOUT_MS = 120_000;
 const ESLINT_TIMEOUT_MS = 120_000;
+const DEV_SERVER_PORT = 4999;
+const DEV_SERVER_STARTUP_TIMEOUT_MS = 60_000;
+const RUNTIME_CHECK_TIMEOUT_MS = 30_000;
+
+const RUNTIME_ERROR_PATTERNS = [
+  /TypeError:\s*.+is not a function/,
+  /TypeError:\s*Cannot read propert/,
+  /TypeError:\s*.+is not iterable/,
+  /TypeError:\s*undefined is not an object/,
+  /TypeError:\s*null is not an object/,
+  /ReferenceError:\s*.+is not defined/,
+  /Uncaught\s+(TypeError|ReferenceError|RangeError)/,
+  /Unhandled Runtime Error/,
+  /\.(?:map|filter|reduce|forEach|find|some|every)\s+is not a function/,
+];
 
 interface DebugAgentOptions {
   supabase: SupabaseClient;
@@ -30,6 +46,180 @@ interface FoundIssue {
   file_path?: string;
   line_number?: number;
   error_message: string;
+}
+
+function httpGet(url: string, timeoutMs = 10_000): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, { timeout: timeoutMs }, (res) => {
+      let body = '';
+      res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
+    req.on('error', reject);
+  });
+}
+
+function extractRoutesFromHtml(body: string): string[] {
+  const routes = new Set<string>(['/']);
+  const hrefPattern = /(?:href|to)=["'](\/([\w-]+(?:\/[\w-:]+)*)?)["']/g;
+  let match: RegExpExecArray | null;
+  while ((match = hrefPattern.exec(body)) !== null) {
+    const route = match[1];
+    if (route && !route.startsWith('//') && !route.includes('.') && route.length < 100) {
+      routes.add(route);
+    }
+  }
+  return Array.from(routes);
+}
+
+async function runRuntimeSmokeTest(
+  projectPath: string,
+  log: (msg: string) => void,
+): Promise<FoundIssue[]> {
+  const issues: FoundIssue[] = [];
+  const baseUrl = `http://localhost:${DEV_SERVER_PORT}`;
+
+  let devProcess: ReturnType<typeof spawn> | null = null;
+  const collectedErrors: string[] = [];
+
+  try {
+    devProcess = spawn('npx', ['vite', '--port', String(DEV_SERVER_PORT), '--strictPort'], {
+      cwd: projectPath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, BROWSER: 'none', PORT: String(DEV_SERVER_PORT) },
+      shell: true,
+    });
+
+    let serverReady = false;
+
+    devProcess.stderr?.on('data', (data: Buffer) => {
+      const text = data.toString();
+      for (const pattern of RUNTIME_ERROR_PATTERNS) {
+        if (pattern.test(text)) {
+          collectedErrors.push(text.trim().slice(0, 500));
+        }
+      }
+    });
+
+    devProcess.stdout?.on('data', (data: Buffer) => {
+      const text = data.toString();
+      if (text.includes('Local:') || text.includes('ready in') || text.includes('VITE')) {
+        serverReady = true;
+      }
+      for (const pattern of RUNTIME_ERROR_PATTERNS) {
+        if (pattern.test(text)) {
+          collectedErrors.push(text.trim().slice(0, 500));
+        }
+      }
+    });
+
+    const startTime = Date.now();
+    while (!serverReady && Date.now() - startTime < DEV_SERVER_STARTUP_TIMEOUT_MS) {
+      await new Promise(r => setTimeout(r, 1000));
+      if (!serverReady) {
+        try {
+          await httpGet(baseUrl, 3000);
+          serverReady = true;
+        } catch { /* server not ready yet */ }
+      }
+    }
+
+    if (!serverReady) {
+      log('Runtime smoke test: dev server failed to start within timeout. Skipping.');
+      return issues;
+    }
+
+    log('Runtime smoke test: dev server ready. Crawling pages...');
+
+    let routesToCheck = ['/'];
+    try {
+      const indexResult = await httpGet(baseUrl, 10_000);
+      if (indexResult.status === 200) {
+        routesToCheck = extractRoutesFromHtml(indexResult.body).slice(0, 15);
+        log(`Runtime smoke test: discovered ${routesToCheck.length} routes to check`);
+      }
+    } catch (err) {
+      log(`Runtime smoke test: failed to fetch index page — ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const checkStart = Date.now();
+    for (const route of routesToCheck) {
+      if (Date.now() - checkStart > RUNTIME_CHECK_TIMEOUT_MS) break;
+      try {
+        const result = await httpGet(`${baseUrl}${route}`, 8_000);
+        if (result.status >= 500) {
+          issues.push({
+            issue_type: 'runtime_error',
+            severity: 'critical',
+            file_path: route,
+            error_message: `Route ${route} returned HTTP ${result.status}`,
+          });
+        }
+        const errorMarkers = [
+          'Unexpected Application Error',
+          'is not a function',
+          'Cannot read propert',
+          'is not defined',
+          'is not iterable',
+        ];
+        for (const marker of errorMarkers) {
+          if (result.body.includes(marker)) {
+            const contextStart = result.body.indexOf(marker);
+            const snippet = result.body.slice(
+              Math.max(0, contextStart - 50),
+              contextStart + 200,
+            ).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+            issues.push({
+              issue_type: 'runtime_error',
+              severity: 'critical',
+              file_path: route,
+              error_message: `Runtime error on ${route}: ${snippet.slice(0, 300)}`,
+            });
+            break;
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!msg.includes('timed out')) {
+          issues.push({
+            issue_type: 'runtime_error',
+            severity: 'high',
+            file_path: route,
+            error_message: `Failed to load ${route}: ${msg}`,
+          });
+        }
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    for (const errText of collectedErrors) {
+      const fileMatch = errText.match(/(src\/[^\s:]+)/);
+      const alreadyReported = issues.some(i => i.error_message.includes(errText.slice(0, 80)));
+      if (!alreadyReported) {
+        issues.push({
+          issue_type: 'runtime_error',
+          severity: 'critical',
+          file_path: fileMatch?.[1],
+          error_message: errText.slice(0, 500),
+        });
+      }
+    }
+
+    log(`Runtime smoke test: found ${issues.length} runtime issues`);
+  } catch (err) {
+    log(`Runtime smoke test error: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    if (devProcess && !devProcess.killed) {
+      devProcess.kill('SIGTERM');
+      await new Promise(r => setTimeout(r, 2000));
+      if (!devProcess.killed) {
+        devProcess.kill('SIGKILL');
+      }
+    }
+  }
+
+  return issues;
 }
 
 export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
@@ -161,15 +351,26 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
       log('ESLint: skipped (not available)');
     }
 
-    // ── 4. Check if clean ──
+    // ── 4. Runtime smoke test ──
+    if (stopIfRequested('pre-runtime-check')) return;
+    const staticIssueCount = issues.length;
+    if (staticIssueCount === 0) {
+      log('Static checks passed. Running runtime smoke test...');
+      const runtimeIssues = await runRuntimeSmokeTest(projectPath, log);
+      issues.push(...runtimeIssues);
+    } else {
+      log(`Skipping runtime smoke test (${staticIssueCount} static issues to fix first)`);
+    }
+
+    // ── 5. Check if clean ──
     if (issues.length === 0) {
-      log('All validations passed! Debug cycle complete.');
+      log('All validations passed (including runtime)! Debug cycle complete.');
       break;
     }
 
     totalFound += issues.length;
 
-    // ── 5. Store issues ──
+    // ── 6. Store issues ──
     const rows = issues.map(i => ({
       build_id: buildId,
       project_id: projectId,
@@ -184,7 +385,7 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
 
     await supabase.from('debug_issues').insert(rows);
 
-    // ── 6. Generate consolidated fix prompt ──
+    // ── 7. Generate consolidated fix prompt ──
     const issuesSummary = issues.slice(0, MAX_ISSUES_PER_PROMPT).map(i => {
       let line = `[${i.issue_type}]`;
       if (i.file_path) line += ` ${i.file_path}`;
@@ -193,7 +394,7 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
       return line;
     }).join('\n');
 
-    const fixPrompt = `Fix the following ${issues.length} errors found in this project:\n\n${issuesSummary}\n\nRules:\n- Fix each error\n- Do not introduce new errors\n- Install any missing dependencies with npm\n- Ensure npm run build passes after fixes`;
+    const fixPrompt = `Fix the following ${issues.length} errors found in this project:\n\n${issuesSummary}\n\nRules:\n- Fix each error\n- Do not introduce new errors\n- Install any missing dependencies with npm\n- Ensure npm run build passes after fixes\n\nRuntime Safety (apply to ALL fixes):\n- All array operations (.map, .filter, .reduce, .forEach, .find, .some, .every) MUST be guarded: use (value ?? []).map(...) or Array.isArray(value) checks\n- All Supabase query results MUST use \`data ?? []\` — Supabase returns null, not [] for empty results\n- All React useState hooks for arrays MUST be initialized with []: useState<Type[]>([])\n- All API/fetch response data MUST be validated before calling array methods: const items = Array.isArray(res?.data) ? res.data : []\n- Use optional chaining (?.) for nested object access from DB or API responses\n- Destructure with defaults: const { items = [], count = 0 } = response ?? {}`;
 
     let stepRowId: string | null = null;
     try {
