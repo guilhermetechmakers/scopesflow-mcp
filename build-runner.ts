@@ -424,11 +424,14 @@ export async function runBuildLoop(
         
         let flowchartQuery = supabase
           .from('flowchart_items')
-          .select('id, prompt, prompt_content, sequence_order')
+          .select('id, prompt, prompt_content, sequence_order, elements')
           .eq('project_id', projectId)
           .eq('type', 'prompt');
         if (isResume) {
           flowchartQuery = flowchartQuery.eq('is_implemented', false);
+        }
+        if (currentAgentPhase === 'feedback') {
+          flowchartQuery = flowchartQuery.filter('elements->>source', 'eq', 'feedback').eq('is_implemented', false);
         }
         const { data: flowchartRows, error: flowchartError } = await flowchartQuery.order('sequence_order', { ascending: true });
         if (flowchartError) {
@@ -985,7 +988,7 @@ export async function runBuildLoop(
 
     // ══════ AGENT PIPELINE ORCHESTRATION ══════
 
-    const phaseOrder = ['developer', 'scope-check', 'design', 'debug'] as const;
+    const phaseOrder = ['developer', 'scope-check', 'design', 'debug', 'feedback'] as const;
     const startIndex = phaseOrder.indexOf(currentAgentPhase as (typeof phaseOrder)[number]);
     const normalizedStartIndex = startIndex === -1 ? 0 : startIndex;
 
@@ -1045,6 +1048,139 @@ export async function runBuildLoop(
       }
     } else {
       await appendLog(`Skipping Debug Agent (current phase: ${currentAgentPhase})`);
+    }
+
+    // Phase 5: Feedback Agent (executes feedback-generated prompts)
+    if (currentAgentPhase === 'feedback') {
+      if (await stopIfRequested('feedback phase')) return;
+      await appendLog('Starting Feedback Agent phase...');
+
+      await supabase.from('automated_builds').update({
+        current_agent_phase: 'feedback',
+        feedback_prompts_total: promptQueue.length,
+        feedback_prompts_completed: 0,
+      }).eq('id', buildId);
+
+      let feedbackStep = 0;
+      const feedbackTotal = promptQueue.length;
+
+      while (promptQueue.length > 0) {
+        if (await stopIfRequested('feedback prompt loop')) return;
+
+        const promptItem = promptQueue.shift()!;
+        feedbackStep++;
+        const promptContent = promptItem.prompt_content;
+        const preview = promptContent.length > 60
+          ? `${promptContent.substring(0, 60).replace(/\n/g, ' ')}...`
+          : promptContent.replace(/\n/g, ' ');
+        await appendLog(`Feedback prompt ${feedbackStep}/${feedbackTotal}: ${preview}`);
+
+        const stepStartMs = Date.now();
+        const stepStartTime = new Date().toISOString();
+
+        let stepRowId: string | null = null;
+        try {
+          const { data: stepRow } = await supabase.from('build_steps').insert({
+            build_id: buildId,
+            step_number: feedbackStep,
+            prompt_id: promptItem.id,
+            prompt_content: promptContent,
+            prompt_source: promptItem.source,
+            agent_phase: 'feedback',
+            status: 'running',
+            started_at: stepStartTime,
+            retry_count: 0,
+          }).select().single();
+          stepRowId = stepRow?.id ?? null;
+        } catch (err) {
+          console.error('[Build Runner] Failed to insert feedback build_steps row:', err);
+        }
+
+        const MAX_STEP_RETRIES = 2;
+        let retryCount = 0;
+        let execResult: ExecutePromptResult = { success: false, error: 'Not executed' };
+
+        while (retryCount <= MAX_STEP_RETRIES) {
+          const executeArgs: BuildExecutePromptArgs = {
+            prompt: promptContent,
+            projectPath,
+            timeout: timeoutPerStep,
+            context: `Feedback prompt ${feedbackStep} of ${feedbackTotal}`,
+            isFirstPrompt: feedbackStep === 1 && retryCount === 0,
+            retryCount,
+            isRetry: retryCount > 0,
+            supabaseClient: supabase,
+            userId: row.user_id,
+            buildId,
+            model,
+            cursorApiKey,
+            promptId: promptItem.id,
+          };
+          if (githubAuth) {
+            if (githubAuth.gitHubToken) executeArgs.gitHubToken = githubAuth.gitHubToken;
+            if (githubAuth.gitUserName) executeArgs.gitUserName = githubAuth.gitUserName;
+            if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
+          }
+
+          const rawResult = await executePromptFn(executeArgs);
+          execResult = parseMcpResult(rawResult);
+
+          if (execResult.success) break;
+
+          retryCount++;
+          if (retryCount > MAX_STEP_RETRIES) {
+            await appendLog(`Feedback prompt ${feedbackStep} permanently failed after ${MAX_STEP_RETRIES + 1} attempts.`, 'error');
+            break;
+          }
+
+          await appendLog(`Feedback prompt ${feedbackStep} failed (attempt ${retryCount}/${MAX_STEP_RETRIES + 1}): ${execResult.error}`, 'error');
+
+          if (stepRowId) {
+            try {
+              await supabase.from('build_steps').update({
+                status: 'retrying',
+                retry_count: retryCount,
+                error_message: execResult.error ?? null,
+              }).eq('id', stepRowId);
+            } catch { /* non-blocking */ }
+          }
+
+          await new Promise(r => setTimeout(r, 5000 * retryCount));
+        }
+
+        const stepStatus = execResult.success ? 'completed' : 'failed';
+        if (stepRowId) {
+          try {
+            await supabase.from('build_steps').update({
+              status: stepStatus,
+              completed_at: new Date().toISOString(),
+              duration_ms: Date.now() - stepStartMs,
+              files_changed: execResult.filesChanged ?? [],
+              error_message: execResult.error ?? null,
+              retry_count: retryCount,
+              has_migrations: execResult.hasMigrations ?? false,
+              migrations: execResult.migrations ?? [],
+            }).eq('id', stepRowId);
+          } catch { /* non-blocking */ }
+        }
+
+        // Mark the flowchart_item as implemented
+        try {
+          await supabase.from('flowchart_items').update({ is_implemented: true }).eq('id', promptItem.id);
+        } catch { /* non-blocking */ }
+
+        await appendLog(`Feedback prompt ${feedbackStep}/${feedbackTotal} ${stepStatus}`);
+
+        await supabase.from('automated_builds').update({
+          feedback_prompts_completed: feedbackStep,
+        }).eq('id', buildId);
+      }
+
+      await supabase.from('automated_builds').update({
+        feedback_completed_at: new Date().toISOString(),
+      }).eq('id', buildId);
+
+      await appendLog(`Feedback Agent phase completed. ${feedbackTotal} prompts executed.`);
     }
 
     // ══════ ALL PHASES COMPLETE ══════
