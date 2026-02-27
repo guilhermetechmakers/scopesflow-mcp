@@ -6211,11 +6211,12 @@ module.exports = {
             .from('automated_builds')
             .select(`
               id, current_agent_phase,
-              developer_completed_at, scope_check_completed_at, design_completed_at, debug_completed_at,
+              developer_completed_at, scope_check_completed_at, design_completed_at, debug_completed_at, feedback_completed_at,
               developer_completion_pct,
               scope_check_pages_total, scope_check_pages_completed,
               design_issues_found, design_issues_fixed,
               debug_issues_found, debug_issues_fixed,
+              feedback_prompts_total, feedback_prompts_completed,
               agent_loop_count
             `)
             .eq('id', targetBuildId)
@@ -6254,6 +6255,12 @@ module.exports = {
                 issuesFound: data.debug_issues_found,
                 issuesFixed: data.debug_issues_fixed,
                 completedAt: data.debug_completed_at,
+              },
+              feedback: {
+                status: data.feedback_completed_at ? 'completed' : data.current_agent_phase === 'feedback' ? 'running' : 'pending',
+                promptsTotal: data.feedback_prompts_total,
+                promptsCompleted: data.feedback_prompts_completed,
+                completedAt: data.feedback_completed_at,
               },
             },
           };

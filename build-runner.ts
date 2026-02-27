@@ -127,6 +127,7 @@ export interface RunBuildFromPayloadOptions {
 export interface AutomatedBuildRow {
   id: string;
   user_id: string;
+  project_id: string;
   status: string;
   current_agent_phase?: string;
   progress?: number;
@@ -400,7 +401,10 @@ export async function runBuildLoop(
   let promptQueue: PromptQueueItem[] = [];
   let promptSource: string | undefined;
 
-  const rawPrompts: string[] = Array.isArray(configuration.prompts) ? configuration.prompts : [];
+  // Feedback phase loads prompts exclusively from flowchart_items (skip configuration.prompts)
+  const rawPrompts: string[] = currentAgentPhase === 'feedback'
+    ? []
+    : (Array.isArray(configuration.prompts) ? configuration.prompts : []);
   if (rawPrompts.length > 0) {
     promptSource = 'configuration.prompts';
     const skipCount = isResume ? (row.current_step ?? 0) : 0;
@@ -416,41 +420,78 @@ export async function runBuildLoop(
   if (promptQueue.length === 0) {
     const projectId =
       (configuration as { projectId?: string; project_id?: string }).projectId ??
-      (configuration as { projectId?: string; project_id?: string }).project_id;
+      (configuration as { projectId?: string; project_id?: string }).project_id ??
+      row.project_id;
     if (projectId) {
       try {
         // Attempt to refresh token before database operation
         await refreshTokenIfNeeded();
         
-        let flowchartQuery = supabase
-          .from('flowchart_items')
-          .select('id, prompt, prompt_content, sequence_order, elements')
-          .eq('project_id', projectId)
-          .eq('type', 'prompt');
-        if (isResume) {
-          flowchartQuery = flowchartQuery.eq('is_implemented', false);
-        }
         if (currentAgentPhase === 'feedback') {
-          flowchartQuery = flowchartQuery.filter('elements->>source', 'eq', 'feedback').eq('is_implemented', false);
-        }
-        const { data: flowchartRows, error: flowchartError } = await flowchartQuery.order('sequence_order', { ascending: true });
-        if (flowchartError) {
-          log(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
-          await appendLog(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
-        }
-        if (Array.isArray(flowchartRows)) {
-          const mapped = flowchartRows
-            .filter((r: { prompt?: string; prompt_content?: string }) => (r.prompt_content ?? r.prompt ?? '').length > 0)
-            .map((r: { id: string; prompt?: string; prompt_content?: string }) => ({
-              id: r.id,
-              prompt_content: (r.prompt_content ?? r.prompt ?? ''),
-              title: (r.prompt_content ?? r.prompt ?? '').substring(0, 60),
-              source: 'sequence' as const,
-              type: 'prompt',
-            }));
-          if (mapped.length > 0) {
-            promptQueue = mapped;
-            promptSource = 'flowchart_items';
+          // Feedback phase: only load feedback-sourced, unimplemented prompts
+          const { data: feedbackRows, error: feedbackError } = await supabase
+            .from('flowchart_items')
+            .select('id, prompt, prompt_content, sequence_order, elements')
+            .eq('project_id', projectId)
+            .eq('type', 'prompt')
+            .eq('is_implemented', false)
+            .order('sequence_order', { ascending: true });
+
+          if (feedbackError) {
+            log(`Failed to query feedback flowchart_items: ${feedbackError.message}`, 'error');
+            await appendLog(`Failed to query feedback flowchart_items: ${feedbackError.message}`, 'error');
+          }
+
+          if (Array.isArray(feedbackRows)) {
+            // Filter in code for elements.source === 'feedback' (avoids PostgREST JSONB filter issues)
+            const feedbackOnly = feedbackRows.filter(
+              (r: { elements?: { source?: string } }) => r.elements?.source === 'feedback'
+            );
+            log(`Feedback flowchart_items: ${feedbackRows.length} total unimplemented, ${feedbackOnly.length} with source=feedback`);
+            await appendLog(`Found ${feedbackOnly.length} feedback prompts to execute`);
+
+            const mapped = feedbackOnly
+              .filter((r: { prompt?: string; prompt_content?: string }) => (r.prompt_content ?? r.prompt ?? '').length > 0)
+              .map((r: { id: string; prompt?: string; prompt_content?: string }) => ({
+                id: r.id,
+                prompt_content: (r.prompt_content ?? r.prompt ?? ''),
+                title: (r.prompt_content ?? r.prompt ?? '').substring(0, 60),
+                source: 'sequence' as const,
+                type: 'prompt',
+              }));
+            if (mapped.length > 0) {
+              promptQueue = mapped;
+              promptSource = 'flowchart_items (feedback)';
+            }
+          }
+        } else {
+          let flowchartQuery = supabase
+            .from('flowchart_items')
+            .select('id, prompt, prompt_content, sequence_order')
+            .eq('project_id', projectId)
+            .eq('type', 'prompt');
+          if (isResume) {
+            flowchartQuery = flowchartQuery.eq('is_implemented', false);
+          }
+          const { data: flowchartRows, error: flowchartError } = await flowchartQuery.order('sequence_order', { ascending: true });
+          if (flowchartError) {
+            log(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
+            await appendLog(`Failed to query flowchart_items: ${flowchartError.message}`, 'error');
+          }
+          if (Array.isArray(flowchartRows)) {
+            const mapped = flowchartRows
+              .filter((r: { prompt?: string; prompt_content?: string }) => (r.prompt_content ?? r.prompt ?? '').length > 0)
+              .map((r: { id: string; prompt?: string; prompt_content?: string }) => ({
+                id: r.id,
+                prompt_content: (r.prompt_content ?? r.prompt ?? ''),
+                title: (r.prompt_content ?? r.prompt ?? '').substring(0, 60),
+                source: 'sequence' as const,
+                type: 'prompt',
+              }));
+            if (mapped.length > 0) {
+              promptQueue = mapped;
+              promptSource = 'flowchart_items';
+            }
           }
         }
       } catch (err) {
@@ -579,7 +620,8 @@ export async function runBuildLoop(
     // Derive projectId for tracker
     const projectId =
       (configuration as { projectId?: string; project_id?: string }).projectId ??
-      (configuration as { projectId?: string; project_id?: string }).project_id ?? '';
+      (configuration as { projectId?: string; project_id?: string }).project_id ??
+      row.project_id ?? '';
 
     // Extract model from configuration (can be at top level or in cursorConfig)
     const rawModel = (mergedCursorConfig as { model?: unknown }).model ?? (configuration as { model?: unknown }).model;
