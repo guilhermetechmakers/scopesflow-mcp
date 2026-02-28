@@ -1341,11 +1341,11 @@ See DESIGN_RULES.md in the server root for complete guidelines.
   }
 
   private validateExecutePromptArgs(args: Record<string, unknown>): ExecutePromptArgs {
-    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId, promptId } = args;
-    
+    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId, promptId, provider } = args;
+
     if (typeof prompt !== 'string') throw new Error('Prompt must be a string');
     if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
-    
+
     return {
       prompt,
       projectPath,
@@ -1362,7 +1362,8 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       supabaseClient: supabaseClient instanceof Object && 'from' in supabaseClient ? supabaseClient as SupabaseClient : undefined,
       userId: typeof userId === 'string' ? userId : undefined,
       buildId: typeof buildId === 'string' ? buildId : undefined,
-      promptId: typeof promptId === 'string' ? promptId : undefined
+      promptId: typeof promptId === 'string' ? promptId : undefined,
+      provider: provider === 'claude-code' ? 'claude-code' : provider === 'cursor' ? 'cursor' : undefined,
     };
   }
 
@@ -6276,12 +6277,14 @@ module.exports = {
             const data = JSON.parse(body || '{}') as {
               buildId?: string; projectId?: string; promptId?: string; promptContent?: string; projectPath?: string;
               timeout?: number; context?: string; supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
+              provider?: 'cursor' | 'claude-code';
             };
-            const { buildId, projectId, promptId, promptContent, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey } = data;
+            const { buildId, projectId, promptId, promptContent, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey, provider } = data;
             
             console.log('[MCP Server] 🔍 DEBUG: Parsed request - buildId=', buildId, 'projectId=', projectId, 'projectPath=', projectPath);
             console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasPromptContent=', !!promptContent, 'promptLength=', promptContent?.length || 0);
             console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasSupabaseUrl=', !!supabaseUrl, 'hasServiceRoleKey=', !!serviceRoleKey, 'hasAnonKey=', !!anonKey, 'hasAccessToken=', !!accessToken);
+            console.log('[MCP Server] 🔍 DEBUG: Parsed request - provider=', provider || 'cursor (default)');
             const hasServiceRole = !!serviceRoleKey;
             const hasUserAuth = !!anonKey && !!accessToken;
             if (!buildId || !projectId || !promptContent || !projectPath || !supabaseUrl || (!hasServiceRole && !hasUserAuth)) {
@@ -6304,7 +6307,7 @@ module.exports = {
               try {
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Calling executePrompt...');
                 const execRes = await this.executePrompt(this.validateExecutePromptArgs({
-                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined, promptId,
+                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined, promptId, provider,
                 }));
                 
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - executePrompt returned, parsing result...');
@@ -6477,6 +6480,7 @@ module.exports = {
           uptime: process.uptime(),
           activeBuilds: this.activeBuildTracker.size,
           cursorAgentAvailable: this.cursorAgentAvailable,
+          claudeCodeAvailable: this.claudeCodeAvailable,
           memoryUsage: process.memoryUsage(),
           diskSpace: await getDiskSpace(),
           timestamp: new Date().toISOString(),
