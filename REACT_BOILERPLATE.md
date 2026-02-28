@@ -638,7 +638,7 @@ const { data, error } = await supabase.functions.invoke('my-function', {
 if (error) throw error;
 ```
 
-Create Edge Functions with `supabase functions new <name>`. Implement in `supabase/functions/<name>/index.ts` (Deno). Use `Deno.env.get('SUPABASE_URL')` and secrets for API keys; never expose keys to the client.
+Create Edge Functions with `supabase functions new <name>`. Implement in `supabase/functions/<name>/index.ts` (Deno). **Always** create `supabase/functions/_shared/cors.ts` first (see EDGE_FUNCTIONS_GUIDE). Every Edge Function must handle CORS preflight and pass the `Authorization` header through to the Supabase client.
 
 ## LLM and AI (via Edge / backend)
 
@@ -646,23 +646,75 @@ Create Edge Functions with `supabase functions new <name>`. Implement in `supaba
 - **Recommended:** Use official SDKs (e.g. `openai`, `@anthropic-ai/sdk`) inside Edge Functions; store keys in Supabase secrets or env.
 - **Pattern:** Client calls `supabase.functions.invoke('llm-proxy', { body: { messages, model?, stream? } })`; Edge validates input, calls the provider, returns JSON or streams.
 
+### Shared CORS module (create first)
+
+```ts
+// supabase/functions/_shared/cors.ts
+export const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Max-Age': '86400',
+};
+```
+
 ### Minimal Edge LLM proxy (non-streaming)
 
 ```ts
 // supabase/functions/llm-proxy/index.ts (Deno)
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { corsHeaders } from '../_shared/cors.ts';
 
 serve(async (req) => {
-  const { messages, model = 'gpt-4o-mini' } = await req.json();
-  const apiKey = Deno.env.get('OPENAI_API_KEY');
-  if (!apiKey) return new Response('Missing OPENAI_API_KEY', { status: 500 });
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model, messages }),
-  });
-  const data = await res.json();
-  return new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  try {
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      {
+        global: {
+          headers: { Authorization: req.headers.get('Authorization')! },
+        },
+      }
+    );
+
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { messages, model = 'gpt-4o-mini' } = await req.json();
+    const apiKey = Deno.env.get('OPENAI_API_KEY');
+    if (!apiKey) {
+      return new Response(
+        JSON.stringify({ error: 'Server misconfigured' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model, messages }),
+    });
+
+    const data = await res.json();
+    return new Response(JSON.stringify(data), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ error: error.message }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
 });
 ```
 

@@ -558,7 +558,69 @@ File layout: keep `src/api/` for resource modules; add `src/lib/supabase.ts` and
 
 ## Edge Functions as API
 
-Treat Edge Functions as API endpoints: define typed request/response and call them from hooks.
+Treat Edge Functions as API endpoints: define typed request/response and call them from hooks. Every Edge Function must include CORS handling and Authorization passthrough (see EDGE_FUNCTIONS_GUIDE for full details).
+
+### Server-side template (Deno)
+
+Every Edge Function must follow this structure. Create `supabase/functions/_shared/cors.ts` first:
+
+```ts
+// supabase/functions/_shared/cors.ts
+export const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Max-Age': '86400',
+};
+```
+
+```ts
+// supabase/functions/my-function/index.ts
+import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { corsHeaders } from '../_shared/cors.ts';
+
+serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  try {
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      {
+        global: {
+          headers: { Authorization: req.headers.get('Authorization')! },
+        },
+      }
+    );
+
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const body = await req.json();
+    // ... function logic ...
+
+    return new Response(
+      JSON.stringify({ data: 'result' }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ error: error.message }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+});
+```
+
+### Client-side invoke wrapper
 
 ```ts
 // src/api/edge.ts

@@ -10,7 +10,7 @@
 6. **ALWAYS use Sonner** for toast notifications
 7. **ALWAYS set up Vitest** for testing
 8. **API layer:** Use native `fetch()` with the API utilities in `src/lib/api.ts` (see REACT_BOILERPLATE)
-9. **When using Supabase:** Use the client for DB/Auth/Realtime/Storage; use Edge Functions for server-only logic and LLM. Invoke with `supabase.functions.invoke('function-name', { body })`.
+9. **When using Supabase:** Use the client for DB/Auth/Realtime/Storage; use Edge Functions for server-only logic and LLM. **Always** create `supabase/functions/_shared/cors.ts` first. Every Edge Function must handle OPTIONS preflight, import `corsHeaders`, and pass the `Authorization` header through to the Supabase client (see EDGE_FUNCTIONS_GUIDE).
 10. **LLM / AI:** Never expose LLM API keys in the client. Call an Edge Function or backend: `supabase.functions.invoke('llm-proxy', { body: { messages } })`.
 
 ---

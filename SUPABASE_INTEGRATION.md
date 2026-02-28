@@ -584,32 +584,71 @@ export const storageApi = {
 
 ## Edge Functions
 
-### 1. Create Edge Function
+### 1. Create Shared CORS Module (required)
+
+Before creating any Edge Function, create the shared CORS module:
+
+```ts
+// supabase/functions/_shared/cors.ts
+export const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Max-Age': '86400',
+};
+```
+
+### 2. Create Edge Function
 ```bash
 supabase functions new my-function
 ```
 
-### 2. Edge Function Example
+### 3. Edge Function Example
 ```ts
 // supabase/functions/my-function/index.ts
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { corsHeaders } from '../_shared/cors.ts';
 
 serve(async (req) => {
-  const supabase = createClient(
-    Deno.env.get('SUPABASE_URL') ?? '',
-    Deno.env.get('SUPABASE_ANON_KEY') ?? ''
-  );
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
 
-  const { data, error } = await supabase.from('projects').select('*');
+  try {
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      {
+        global: {
+          headers: { Authorization: req.headers.get('Authorization')! },
+        },
+      }
+    );
 
-  return new Response(JSON.stringify({ data, error }), {
-    headers: { 'Content-Type': 'application/json' },
-  });
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { data, error } = await supabase.from('projects').select('*');
+
+    return new Response(JSON.stringify({ data, error }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ error: error.message }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
 });
 ```
 
-### 3. Call Edge Function
+### 4. Call Edge Function
 ```ts
 const { data, error } = await supabase.functions.invoke('my-function', {
   body: { name: 'Functions' },
