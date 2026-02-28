@@ -61,6 +61,7 @@ interface ExecutePromptArgs {
   model?: string;            // NEW: Model to use for cursor-agent (defaults to "composer-1.5")
   cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
   promptId?: string;         // NEW: Flowchart prompt ID — included in mcp_log for correct marking on completion
+  provider?: 'cursor' | 'claude-code'; // AI provider: cursor-agent or claude CLI
 }
 interface ProjectPathArgs {
   projectPath: string;
@@ -143,6 +144,7 @@ class CursorMCPServer {
 
     this.setupToolHandlers();
     this.checkCursorAgent();
+    this.checkClaudeCode();
     this.initializeDefaultDesignPatterns();
   }
 
@@ -307,6 +309,25 @@ This interface embodies:
         console.warn('[MCP Server] Install with: curl https://cursor.com/install -fsS | bash');
       }
       console.warn('[MCP Server] Code generation will use fallback mode.');
+    }
+  }
+
+  private claudeCodeAvailable = false;
+
+  private async checkClaudeCode() {
+    try {
+      const isWindows = process.platform === 'win32';
+      const command = isWindows
+        ? 'wsl -d Ubuntu bash -c "claude --version"'
+        : 'claude --version';
+
+      const { stdout } = await execAsync(command);
+      this.claudeCodeAvailable = true;
+      console.log(`[MCP Server] ✓ Claude Code CLI detected and available (version: ${stdout.trim()})`);
+    } catch {
+      this.claudeCodeAvailable = false;
+      console.warn('[MCP Server] ⚠ Claude Code CLI not found.');
+      console.warn('[MCP Server] Install with: npm install -g @anthropic-ai/claude-code');
     }
   }
 
@@ -1818,7 +1839,33 @@ When implementing this project:
     console.log(`[MCP Server] ✅ Created Design_reference.md at ${designRefPath}`);
   }
 
-  // CURSOR CLI INTEGRATION - Let Cursor handle the AI code generation!
+  /**
+   * Write CLAUDE.md project instructions for Claude Code builds.
+   * Claude Code reads this file automatically for project-level directives.
+   */
+  private async ensureClaudeMd(projectPath: string): Promise<void> {
+    const claudeMdPath = path.join(projectPath, 'CLAUDE.md');
+    try {
+      await fs.access(claudeMdPath);
+      return; // already exists
+    } catch {
+      // doesn't exist, create it
+    }
+    const content = `# Project Instructions
+
+- TypeScript strict mode — fix all type errors
+- Use existing patterns, conventions, and file structure in the codebase
+- Do NOT start dev servers or run interactive/long-running commands
+- Do NOT run \`npm run dev\`, \`npm start\`, \`yarn dev\`, or similar
+- Apply all changes directly to files
+- Follow the Design_reference.md when available
+- Ensure all imports resolve correctly
+- Prefer small, focused changes over large rewrites
+`;
+    await fs.writeFile(claudeMdPath, content, 'utf-8');
+    console.log(`[MCP Server] ✅ Created CLAUDE.md at ${claudeMdPath}`);
+  }
+
   private async executePrompt(args: ExecutePromptArgs) {
     const startTime = Date.now();
 
@@ -1841,9 +1888,10 @@ When implementing this project:
     };
 
     try {
-      await appendBuildLog('Executing prompt via Cursor CLI');
+      const cliLabel = args.provider === 'claude-code' ? 'Claude Code' : 'Cursor CLI';
+      await appendBuildLog(`Executing prompt via ${cliLabel}`);
       console.log(`[MCP Server] ========================================`);
-      console.log(`[MCP Server] Executing prompt via Cursor CLI`);
+      console.log(`[MCP Server] Executing prompt via ${cliLabel}`);
       console.log(`[MCP Server] Project: ${args.projectPath}`);
       console.log(`[MCP Server] Prompt preview: ${args.prompt.substring(0, 200)}...`);
       console.log(`[MCP Server] Timeout: ${args.timeout || 300000}ms`);
@@ -1858,6 +1906,10 @@ When implementing this project:
         throw new Error(`Project directory does not exist: ${args.projectPath}`);
       }
       await appendBuildLog('Project directory verified');
+
+      if (args.provider === 'claude-code') {
+        await this.ensureClaudeMd(args.projectPath);
+      }
 
       // Load existing git configuration and merge with provided parameters
       console.log('[MCP Server] 🔍 Loading git configuration...');
@@ -2457,19 +2509,33 @@ Analyze the existing project structure and implement the task following the patt
         : undefined;
 
       try {
-        const result = await this.executeCursorAgentStreaming(
-          command,
-          isWindows ? undefined : actualProjectPath,
-          args.timeout || 300000, // 5 minute default
-          onBuildLog,
-          args.cursorApiKey,
-        );
-        stdout = result.stdout;
-        stderr = result.stderr;
-        cursorAgentLogs = result.logs;
-        console.log(`[MCP Server] 📊 Captured ${cursorAgentLogs.length} log entries from cursor-agent`);
+        if (args.provider === 'claude-code') {
+          console.log(`[MCP Server] Using Claude Code provider`);
+          const result = await this.executeClaudeCodeStreaming(
+            directivePrompt,
+            actualProjectPath,
+            args.timeout || 300000,
+            onBuildLog,
+            args.model,
+          );
+          stdout = result.stdout;
+          stderr = result.stderr;
+          cursorAgentLogs = result.logs;
+          console.log(`[MCP Server] 📊 Captured ${cursorAgentLogs.length} log entries from Claude Code`);
+        } else {
+          const result = await this.executeCursorAgentStreaming(
+            command,
+            isWindows ? undefined : actualProjectPath,
+            args.timeout || 300000,
+            onBuildLog,
+            args.cursorApiKey,
+          );
+          stdout = result.stdout;
+          stderr = result.stderr;
+          cursorAgentLogs = result.logs;
+          console.log(`[MCP Server] 📊 Captured ${cursorAgentLogs.length} log entries from cursor-agent`);
+        }
       } catch (error: any) {
-        // Check if this is a timeout error
         const isTimeoutError = error.message?.includes('timed out') || 
                               error.message?.includes('timeout') ||
                               error.message?.includes('terminating process');
@@ -2479,8 +2545,8 @@ Analyze the existing project structure and implement the task following the patt
           return await this.handleTimeoutWithFallback(args, startTime);
         }
         
-        // cursor-agent process errors - log but may have captured output
-        console.error(`[MCP Server] ⚠ cursor-agent error:`, error.message);
+        const providerLabel = args.provider === 'claude-code' ? 'Claude Code' : 'cursor-agent';
+        console.error(`[MCP Server] ⚠ ${providerLabel} error:`, error.message);
         throw error;
       }
       
@@ -2491,8 +2557,9 @@ Analyze the existing project structure and implement the task following the patt
         // Ignore cleanup errors
       }
 
-      await appendBuildLog('Cursor Agent execution completed');
-      console.log(`[MCP Server] ✓ Cursor Agent execution completed`);
+      const providerName = args.provider === 'claude-code' ? 'Claude Code' : 'Cursor Agent';
+      await appendBuildLog(`${providerName} execution completed`);
+      console.log(`[MCP Server] ✓ ${providerName} execution completed`);
       console.log(`[MCP Server] Output length: ${stdout.length} characters`);
       
       if (stderr) {
@@ -3546,13 +3613,14 @@ This task was created by ScopesFlow automation. To complete:
   }
   
   /**
-   * Auto-fix build errors using cursor-agent
+   * Auto-fix build errors using cursor-agent or Claude Code.
    */
   private async autoFixBuildErrors(
     projectPath: string,
     errorDetails: { errors: string[]; output: string; summary: string },
     retryCount: number = 0,
-    model?: string
+    model?: string,
+    provider?: 'cursor' | 'claude-code',
   ): Promise<{ success: boolean; message: string }> {
     console.log(`[MCP Server] 🔧 Auto-fixing build errors (attempt ${retryCount + 1}/${this.MAX_BUILD_FIX_RETRIES})...`);
     
@@ -3617,36 +3685,45 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         // Don't fail the fix attempt if npm install fails - agent might be able to fix it
       }
       
-      // Save fix prompt to temp file
-      const tempPromptFile = path.join(actualProjectPath, '.cursor-fix-prompt.tmp');
-      await fs.writeFile(tempPromptFile, fixPrompt, 'utf-8');
-      
-      const modelArg = model || 'composer-1.5';
-      let command: string;
-      if (isWindows) {
-        const wslProjectPath = actualProjectPath
-          .replace(/\\/g, '/')
-          .replace(/^([A-Z]):/i, (match, drive) => `/mnt/${drive.toLowerCase()}`);
-        
-        const wslPromptFile = wslProjectPath + '/.cursor-fix-prompt.tmp';
-        command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
+      if (provider === 'claude-code') {
+        console.log(`[MCP Server] Executing Claude Code to fix errors...`);
+        await this.executeClaudeCodeStreaming(
+          fixPrompt,
+          actualProjectPath,
+          300000,
+          undefined,
+          model,
+        );
       } else {
-        command = `cat .cursor-fix-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
-      }
-      
-      console.log(`[MCP Server] Executing cursor-agent to fix errors...`);
-      
-      await this.executeCursorAgentStreaming(
-        command,
-        isWindows ? undefined : actualProjectPath,
-        300000 // 5 minutes
-      );
-      
-      // Clean up temp file
-      try {
-        await fs.unlink(tempPromptFile);
-      } catch (e) {
-        // Ignore cleanup errors
+        const tempPromptFile = path.join(actualProjectPath, '.cursor-fix-prompt.tmp');
+        await fs.writeFile(tempPromptFile, fixPrompt, 'utf-8');
+
+        const modelArg = model || 'composer-1.5';
+        let command: string;
+        if (isWindows) {
+          const wslProjectPath = actualProjectPath
+            .replace(/\\/g, '/')
+            .replace(/^([A-Z]):/i, (match: string, drive: string) => `/mnt/${drive.toLowerCase()}`);
+
+          const wslPromptFile = wslProjectPath + '/.cursor-fix-prompt.tmp';
+          command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
+        } else {
+          command = `cat .cursor-fix-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
+        }
+
+        console.log(`[MCP Server] Executing cursor-agent to fix errors...`);
+
+        await this.executeCursorAgentStreaming(
+          command,
+          isWindows ? undefined : actualProjectPath,
+          300000
+        );
+
+        try {
+          await fs.unlink(tempPromptFile);
+        } catch {
+          // Ignore cleanup errors
+        }
       }
       
       console.log(`[MCP Server] ✅ Cursor-agent fix attempt completed`);
@@ -3969,6 +4046,236 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         const errMsg = `Cursor-agent process error: ${error.message}`;
         console.error(`[MCP Server] ❌ ${errMsg}`);
         addLog('error', errMsg, { error: error.message });
+        reject(error);
+      });
+    });
+  }
+
+  /**
+   * Execute Claude Code CLI with real-time streaming output.
+   * Mirrors executeCursorAgentStreaming() but uses the pre-authenticated `claude` CLI.
+   */
+  private async executeClaudeCodeStreaming(
+    prompt: string,
+    projectPath: string,
+    timeout: number,
+    onBuildLog?: (message: string, level?: 'info' | 'error') => void | Promise<void>,
+    model?: string,
+  ): Promise<{ stdout: string; stderr: string; logs: Array<{ timestamp: string; type: string; message: string; data?: any }> }> {
+    const isWindows = process.platform === 'win32';
+    let actualProjectPath = projectPath;
+    if (!path.isAbsolute(projectPath)) {
+      actualProjectPath = path.resolve(process.cwd(), projectPath);
+    }
+
+    const promptFile = path.join(actualProjectPath, '.claude-prompt.tmp');
+    await fs.writeFile(promptFile, prompt, 'utf-8');
+
+    const modelArg = model || 'claude-sonnet-4-20250514';
+    let command: string;
+
+    if (isWindows) {
+      const wslPath = actualProjectPath
+        .replace(/\\/g, '/')
+        .replace(/^([A-Z]):/i, (_: string, d: string) => `/mnt/${d.toLowerCase()}`);
+      command = `wsl -d Ubuntu bash -c "cd '${wslPath}' && cat .claude-prompt.tmp | claude -p --output-format stream-json --max-turns 25 --model ${modelArg} --dangerously-skip-permissions"`;
+    } else {
+      command = `cd '${actualProjectPath}' && cat .claude-prompt.tmp | claude -p --output-format stream-json --max-turns 25 --model ${modelArg} --dangerously-skip-permissions`;
+    }
+
+    return new Promise((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      let stdoutBuffer = '';
+      let timedOut = false;
+      const logs: Array<{ timestamp: string; type: string; message: string; data?: any }> = [];
+      const startTime = Date.now();
+      let assistantBuffer = '';
+      let assistantChunkCount = 0;
+
+      const compactForBuildLog = (text: string): string =>
+        text.replace(/\s+/g, ' ').trim();
+
+      const flushAssistantBuffer = (elapsed?: string) => {
+        if (!assistantBuffer) return;
+        const normalized = assistantBuffer.replace(/\r\n/g, '\n').trim();
+        if (!normalized) {
+          assistantBuffer = '';
+          assistantChunkCount = 0;
+          return;
+        }
+        addLog('agent_assistant', normalized, { elapsed, chunks: assistantChunkCount });
+        assistantBuffer = '';
+        assistantChunkCount = 0;
+      };
+
+      const addLog = (type: string, message: string, data?: any) => {
+        logs.push({ timestamp: new Date().toISOString(), type, message, data });
+        if (onBuildLog) {
+          const level = type === 'agent_error' || type === 'warning' ? 'error' : 'info';
+          const safeMessage = type === 'agent_assistant' ? compactForBuildLog(message) : message;
+          const line = `[Claude] ${type}: ${safeMessage}`.substring(0, 500);
+          Promise.resolve(onBuildLog(line, level)).catch(() => {});
+        }
+      };
+
+      console.log('[MCP Server] Starting Claude Code with streaming output...');
+      addLog('info', 'Starting Claude Code with streaming output');
+
+      const childProcess = spawn(command, [], {
+        cwd: isWindows ? undefined : actualProjectPath,
+        shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: process.env,
+      });
+
+      const timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        const msg = 'Claude Code timed out, terminating process...';
+        console.log(`[MCP Server] ⚠ ${msg}`);
+        addLog('warning', msg);
+        childProcess.kill('SIGTERM');
+        setTimeout(() => {
+          if (!childProcess.killed) {
+            childProcess.kill('SIGKILL');
+            addLog('warning', 'Force killed Claude Code process');
+          }
+        }, 5000);
+      }, timeout);
+
+      childProcess.stdout?.on('data', (data: Buffer) => {
+        const text = data.toString();
+        stdout += text;
+        stdoutBuffer += text;
+
+        const devServerPatterns = [
+          /"command"\s*:\s*"[^"]*npm\s+run\s+(dev|start)[^"]*"/i,
+          /"command"\s*:\s*"[^"]*(yarn|pnpm)\s+dev[^"]*"/i,
+        ];
+        if (devServerPatterns.some(p => p.test(text))) {
+          const alertMsg = 'ALERT: Claude Code is trying to run a dev server!';
+          console.error(`[MCP Server] ${alertMsg}`);
+          addLog('error', alertMsg);
+          setTimeout(() => {
+            if (!childProcess.killed) {
+              addLog('error', 'Force-killing Claude Code to prevent dev server hang!');
+              childProcess.kill('SIGKILL');
+            }
+          }, 10000);
+        }
+
+        const lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const jsonData = JSON.parse(line);
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+            if (jsonData.type === 'assistant') {
+              const content = jsonData.message?.content;
+              let text = '';
+              if (typeof content === 'string') {
+                text = content;
+              } else if (Array.isArray(content)) {
+                text = content
+                  .filter((c: any) => c.type === 'text' && typeof c.text === 'string')
+                  .map((c: any) => c.text)
+                  .join('');
+              }
+              if (text) {
+                process.stdout.write(text.substring(0, 200));
+                assistantBuffer += text;
+                assistantChunkCount++;
+              }
+              const toolUses = Array.isArray(content)
+                ? content.filter((c: any) => c.type === 'tool_use')
+                : [];
+              for (const tool of toolUses) {
+                flushAssistantBuffer(elapsed);
+                const toolName = tool.name || 'unknown';
+                const toolInput = JSON.stringify(tool.input || {}).substring(0, 200);
+                console.log(`[Claude] Tool: ${toolName} ${toolInput}`);
+                addLog('agent_tool_call', `${toolName}: ${toolInput}`, { elapsed, raw: tool });
+              }
+            } else if (jsonData.type === 'result') {
+              flushAssistantBuffer(elapsed);
+              const costUsd = jsonData.cost_usd;
+              const durationMs = jsonData.duration_ms;
+              const numTurns = jsonData.num_turns;
+              const subtype = jsonData.subtype || 'unknown';
+              const resultText = typeof jsonData.result === 'string' ? jsonData.result.substring(0, 300) : '';
+              const msg = `Result: ${subtype} (turns: ${numTurns}, cost: $${costUsd?.toFixed(4) ?? '?'}, duration: ${durationMs ?? '?'}ms)`;
+              console.log(`[Claude] ${msg}`);
+              addLog('agent_completion', msg, { elapsed, costUsd, durationMs, numTurns, subtype, resultPreview: resultText });
+            } else if (jsonData.type === 'system') {
+              flushAssistantBuffer(elapsed);
+              const msg = jsonData.message || JSON.stringify(jsonData);
+              console.log(`[Claude] System: ${msg}`);
+              addLog('agent_status', msg, { elapsed, raw: jsonData });
+            } else {
+              flushAssistantBuffer(elapsed);
+              const info = JSON.stringify(jsonData).substring(0, 200);
+              console.log(`[Claude] ${jsonData.type || 'Event'}: ${info}`);
+              addLog('agent_event', info, { elapsed, eventType: jsonData.type });
+            }
+          } catch {
+            if (line.trim()) {
+              flushAssistantBuffer();
+              console.log(`[Claude] ${line}`);
+              addLog('agent_output', line);
+            }
+          }
+        }
+      });
+
+      childProcess.stderr?.on('data', (data: Buffer) => {
+        const text = data.toString();
+        stderr += text;
+        const lines = text.split('\n').filter((l: string) => l.trim());
+        for (const line of lines) {
+          flushAssistantBuffer();
+          console.error(`[Claude] stderr: ${line}`);
+          addLog('agent_stderr', line);
+        }
+      });
+
+      childProcess.on('close', (code, signal) => {
+        clearTimeout(timeoutHandle);
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        flushAssistantBuffer(elapsed);
+
+        if (stdoutBuffer.trim()) {
+          try {
+            const jsonData = JSON.parse(stdoutBuffer);
+            addLog('agent_final', JSON.stringify(jsonData).substring(0, 200), { raw: jsonData });
+          } catch {
+            addLog('agent_output', stdoutBuffer);
+          }
+        }
+
+        // Clean up temp file
+        fs.unlink(promptFile).catch(() => {});
+
+        if (timedOut) {
+          addLog('warning', 'Claude Code timed out but may have completed work', { elapsed, exitCode: code, signal });
+          resolve({ stdout, stderr, logs });
+        } else if (code !== 0 && code !== null) {
+          addLog('warning', `Claude Code exited with code ${code}`, { elapsed, exitCode: code, signal });
+          resolve({ stdout, stderr, logs });
+        } else {
+          addLog('success', 'Claude Code completed successfully', { elapsed, exitCode: code, totalLogs: logs.length });
+          resolve({ stdout, stderr, logs });
+        }
+      });
+
+      childProcess.on('error', (error) => {
+        clearTimeout(timeoutHandle);
+        const errMsg = `Claude Code process error: ${error.message}`;
+        console.error(`[MCP Server] ${errMsg}`);
+        addLog('error', errMsg, { error: error.message });
+        fs.unlink(promptFile).catch(() => {});
         reject(error);
       });
     });

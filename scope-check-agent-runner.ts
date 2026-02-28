@@ -1,5 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js';
-import type { ExecutePromptFn, BuildExecutePromptArgs } from './build-runner.js';
+import type { ExecutePromptFn, BuildExecutePromptArgs, BuildProvider } from './build-runner.js';
 
 interface ScopeCheckAgentOptions {
   supabase: SupabaseClient;
@@ -9,6 +9,7 @@ interface ScopeCheckAgentOptions {
   executePromptFn: ExecutePromptFn;
   model?: string;
   cursorApiKey?: string;
+  provider?: BuildProvider;
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
   shouldStop?: () => boolean;
@@ -27,7 +28,7 @@ interface GeneratePagePromptResponse {
 export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
-    executePromptFn, model, cursorApiKey, githubAuth, userId, shouldStop,
+    executePromptFn, model, cursorApiKey, provider, githubAuth, userId, shouldStop,
   } = options;
 
   const log = (msg: string, level: 'info' | 'warn' | 'error' = 'info') => {
@@ -148,6 +149,7 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
       isFirstPrompt: false,
       model,
       cursorApiKey,
+      provider,
       supabaseClient: supabase,
       userId,
       buildId,

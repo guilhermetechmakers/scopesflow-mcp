@@ -2,7 +2,7 @@ import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as http from 'http';
 import { SupabaseClient } from '@supabase/supabase-js';
-import type { ExecutePromptFn, BuildExecutePromptArgs } from './build-runner.js';
+import type { ExecutePromptFn, BuildExecutePromptArgs, BuildProvider } from './build-runner.js';
 
 const execAsync = promisify(exec);
 
@@ -35,6 +35,7 @@ interface DebugAgentOptions {
   executePromptFn: ExecutePromptFn;
   model?: string;
   cursorApiKey?: string;
+  provider?: BuildProvider;
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
   shouldStop?: () => boolean;
@@ -225,7 +226,7 @@ async function runRuntimeSmokeTest(
 export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
-    executePromptFn, model, cursorApiKey, githubAuth, userId, shouldStop,
+    executePromptFn, model, cursorApiKey, provider, githubAuth, userId, shouldStop,
   } = options;
 
   const log = (msg: string) => {
@@ -419,6 +420,7 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
       isFirstPrompt: false,
       model,
       cursorApiKey,
+      provider,
       supabaseClient: supabase,
       userId,
       buildId,

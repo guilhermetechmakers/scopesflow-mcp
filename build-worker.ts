@@ -73,11 +73,28 @@ async function checkCursorAgent(): Promise<boolean> {
   }
 }
 
+/** Check if claude CLI is available. */
+async function checkClaudeCode(): Promise<boolean> {
+  try {
+    const isWindows = process.platform === 'win32';
+    const command = isWindows
+      ? 'wsl -d Ubuntu bash -c "claude --version"'
+      : 'claude --version';
+    const { stdout } = await execAsync(command);
+    console.log(`[BuildWorker] Claude Code detected: ${stdout.trim()}`);
+    return true;
+  } catch {
+    console.warn('[BuildWorker] Claude Code not available');
+    return false;
+  }
+}
+
 // ──── Main ────
 async function main() {
   const hasCursorAgent = await checkCursorAgent();
-  if (!hasCursorAgent) {
-    console.error('[BuildWorker] Cannot run build without cursor-agent CLI.');
+  const hasClaudeCode = await checkClaudeCode();
+  if (!hasCursorAgent && !hasClaudeCode) {
+    console.error('[BuildWorker] Cannot run build without cursor-agent or Claude Code CLI.');
     process.exit(1);
   }
 

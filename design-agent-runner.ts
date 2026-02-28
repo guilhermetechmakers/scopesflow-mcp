@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { SupabaseClient } from '@supabase/supabase-js';
-import type { ExecutePromptFn, BuildExecutePromptArgs } from './build-runner.js';
+import type { ExecutePromptFn, BuildExecutePromptArgs, BuildProvider } from './build-runner.js';
 
 const MAX_FILES_TO_AUDIT = 100;
 const MAX_DESIGN_FIX_PROMPTS = 30;
@@ -14,6 +14,7 @@ interface DesignAgentOptions {
   executePromptFn: ExecutePromptFn;
   model?: string;
   cursorApiKey?: string;
+  provider?: BuildProvider;
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
   shouldStop?: () => boolean;
@@ -22,7 +23,7 @@ interface DesignAgentOptions {
 export async function runDesignAgent(options: DesignAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
-    executePromptFn, model, cursorApiKey, githubAuth, userId, shouldStop,
+    executePromptFn, model, cursorApiKey, provider, githubAuth, userId, shouldStop,
   } = options;
 
   const log = (msg: string) => {
@@ -221,6 +222,7 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
         isFirstPrompt: false,
         model,
         cursorApiKey,
+        provider,
         supabaseClient: supabase,
         userId,
         buildId,
