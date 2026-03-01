@@ -75,16 +75,27 @@ async function checkCursorAgent(): Promise<boolean> {
 
 /** Check if claude CLI is available. */
 async function checkClaudeCode(): Promise<boolean> {
+  const isWindows = process.platform === 'win32';
   try {
-    const isWindows = process.platform === 'win32';
-    const command = isWindows
+    const versionCmd = isWindows
       ? 'wsl -d Ubuntu bash -c "claude --version"'
       : 'claude --version';
-    const { stdout } = await execAsync(command);
+    const { stdout } = await execAsync(versionCmd);
     console.log(`[BuildWorker] Claude Code detected: ${stdout.trim()}`);
+  } catch {
+    console.warn('[BuildWorker] Claude Code CLI not found');
+    return false;
+  }
+
+  try {
+    const authCmd = isWindows
+      ? 'wsl -d Ubuntu bash -c "claude auth status"'
+      : 'claude auth status';
+    await execAsync(authCmd);
+    console.log('[BuildWorker] Claude Code authenticated and ready');
     return true;
   } catch {
-    console.warn('[BuildWorker] Claude Code not available');
+    console.warn('[BuildWorker] Claude Code found but NOT authenticated. Run: claude auth login');
     return false;
   }
 }

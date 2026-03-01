@@ -315,19 +315,33 @@ This interface embodies:
   private claudeCodeAvailable = false;
 
   private async checkClaudeCode() {
+    const isWindows = process.platform === 'win32';
     try {
-      const isWindows = process.platform === 'win32';
-      const command = isWindows
+      const versionCmd = isWindows
         ? 'wsl -d Ubuntu bash -c "claude --version"'
         : 'claude --version';
 
-      const { stdout } = await execAsync(command);
-      this.claudeCodeAvailable = true;
-      console.log(`[MCP Server] ✓ Claude Code CLI detected and available (version: ${stdout.trim()})`);
+      const { stdout } = await execAsync(versionCmd);
+      console.log(`[MCP Server] ✓ Claude Code CLI detected (version: ${stdout.trim()})`);
     } catch {
       this.claudeCodeAvailable = false;
       console.warn('[MCP Server] ⚠ Claude Code CLI not found.');
       console.warn('[MCP Server] Install with: npm install -g @anthropic-ai/claude-code');
+      return;
+    }
+
+    try {
+      const authCmd = isWindows
+        ? 'wsl -d Ubuntu bash -c "claude auth status"'
+        : 'claude auth status';
+
+      await execAsync(authCmd);
+      this.claudeCodeAvailable = true;
+      console.log('[MCP Server] ✓ Claude Code CLI authenticated and ready');
+    } catch {
+      this.claudeCodeAvailable = false;
+      console.warn('[MCP Server] ⚠ Claude Code CLI found but NOT authenticated.');
+      console.warn('[MCP Server] Run: claude auth login');
     }
   }
 
@@ -2583,7 +2597,6 @@ Analyze the existing project structure and implement the task following the patt
       console.log(`[MCP Server] Total files changed: ${filesChanged.length}`);
 
       if (filesChanged.length > 0) {
-        // Categorize files by type
         const categorized = this.categorizeFiles(filesChanged);
         
         Object.entries(categorized).forEach(([category, files]) => {
@@ -2596,6 +2609,18 @@ Analyze the existing project structure and implement the task following the patt
         console.log(`[MCP Server] ⚠️ No files were changed`);
       }
       console.log(`[MCP Server] ========================================`);
+
+      if (args.provider === 'claude-code' && stdout.length === 0 && filesChanged.length === 0) {
+        const hasSuccessResult = cursorAgentLogs.some(
+          (l) => l.type === 'agent_completion' && l.message.includes('success')
+        );
+        if (!hasSuccessResult) {
+          const failMsg = 'Claude Code produced zero output and changed zero files — treating as failed execution.';
+          console.error(`[MCP Server] ❌ ${failMsg}`);
+          await appendBuildLog(failMsg, 'error');
+          throw new Error(failMsg);
+        }
+      }
 
       // Validate Tailwind v3 compliance after AI code generation
       try {
@@ -4072,16 +4097,17 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     const promptFile = path.join(actualProjectPath, '.claude-prompt.tmp');
     await fs.writeFile(promptFile, prompt, 'utf-8');
 
-    const modelArg = model || 'claude-sonnet-4-20250514';
+    const modelArg = model || 'opus';
+    const allowedTools = 'Bash,Read,Edit,Write,MultiEdit,Glob,Grep';
     let command: string;
 
     if (isWindows) {
       const wslPath = actualProjectPath
         .replace(/\\/g, '/')
         .replace(/^([A-Z]):/i, (_: string, d: string) => `/mnt/${d.toLowerCase()}`);
-      command = `wsl -d Ubuntu bash -c "cd '${wslPath}' && cat .claude-prompt.tmp | claude -p --output-format stream-json --max-turns 25 --model ${modelArg} --dangerously-skip-permissions"`;
+      command = `wsl -d Ubuntu bash -c "cd '${wslPath}' && claude -p \\\"$(cat .claude-prompt.tmp)\\\" --output-format stream-json --verbose --max-turns 25 --model ${modelArg} --allowedTools '${allowedTools}'"`;
     } else {
-      command = `cd '${actualProjectPath}' && cat .claude-prompt.tmp | claude -p --output-format stream-json --max-turns 25 --model ${modelArg} --dangerously-skip-permissions`;
+      command = `cd '${actualProjectPath}' && claude -p "$(cat .claude-prompt.tmp)" --output-format stream-json --verbose --max-turns 25 --model ${modelArg} --allowedTools '${allowedTools}'`;
     }
 
     return new Promise((resolve, reject) => {
