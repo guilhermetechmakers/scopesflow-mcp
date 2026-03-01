@@ -1332,7 +1332,7 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
 
   // ──── Determine provider from build row or configuration ────
   const buildProvider: BuildProvider =
-    (row as any).provider === 'claude-code'
+    (buildRow as any).provider === 'claude-code'
       ? 'claude-code'
       : ((configuration as { provider?: string }).provider === 'claude-code' ? 'claude-code' : 'cursor');
 
