@@ -533,8 +533,12 @@ export async function runBuildLoop(
 
   const missingFields: string[] = [];
   if (!hasString(rawProjectName)) missingFields.push('projectName');
-  if (!hasString(rawFramework)) missingFields.push('framework');
-  if (!hasString(rawPackageManager)) missingFields.push('packageManager');
+  // framework/packageManager are only required for new project creation, not for
+  // cloned repos where cursor_project_path is already set (isResume = true).
+  if (!isResume) {
+    if (!hasString(rawFramework)) missingFields.push('framework');
+    if (!hasString(rawPackageManager)) missingFields.push('packageManager');
+  }
   if (missingFields.length > 0) {
     const message = `Missing required build configuration: ${missingFields.join(', ')}`;
     log(message, 'error');

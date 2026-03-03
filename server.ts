@@ -6280,6 +6280,125 @@ module.exports = {
         return;
       }
 
+      // POST /api/clone-project
+      if (req.method === 'POST' && (urlPath === '/api/clone-project' || urlPath === '/api/clone-project/')) {
+        console.error('[MCP Server] POST /api/clone-project received');
+        if (apiKey) {
+          const headerKey = req.headers['x-api-key'];
+          if (headerKey !== apiKey) {
+            res.writeHead(401, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+        }
+        let body = '';
+        req.on('data', (chunk: string) => { body += chunk; });
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body || '{}') as {
+              buildId?: string; repoUrl?: string; branch?: string;
+              gitHubToken?: string; gitUserName?: string; gitUserEmail?: string;
+              projectPath?: string;
+              supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
+            };
+            const { buildId, repoUrl, branch, gitHubToken, gitUserName, gitUserEmail, projectPath, supabaseUrl, anonKey, accessToken, serviceRoleKey } = data;
+            if (!buildId || !repoUrl || !gitHubToken || !projectPath) {
+              res.writeHead(400, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: 'Missing required fields: buildId, repoUrl, gitHubToken, projectPath' }));
+              return;
+            }
+
+            const hasServiceRole = !!serviceRoleKey;
+            const hasUserAuth = !!anonKey && !!accessToken;
+            let supabase: SupabaseClient | null = null;
+            if (supabaseUrl && (hasServiceRole || hasUserAuth)) {
+              supabase = hasServiceRole
+                ? createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } })
+                : createClient(supabaseUrl, anonKey as string, { global: { headers: { Authorization: `Bearer ${accessToken}` } } });
+            }
+
+            const parentDir = path.dirname(projectPath);
+            await fs.mkdir(parentDir, { recursive: true });
+
+            const authUrl = repoUrl.replace('https://', `https://x-access-token:${gitHubToken}@`);
+            const cloneBranch = branch || 'main';
+            const cloneCmd = `git clone --branch ${cloneBranch} --single-branch "${authUrl}" "${projectPath}"`;
+
+            console.log(`[MCP Server] Cloning repo to ${projectPath} (branch: ${cloneBranch})`);
+            try {
+              await execAsync(cloneCmd, { cwd: parentDir, timeout: 300000 });
+            } catch (cloneErr: any) {
+              const msg = cloneErr?.stderr || cloneErr?.message || 'git clone failed';
+              console.error('[MCP Server] git clone failed:', msg);
+              if (supabase) {
+                try { await supabase.from('build_logs').insert({ build_id: buildId, log_type: 'build_log', message: `Clone failed: ${msg}`, created_at: new Date().toISOString() }); } catch (_) {}
+              }
+              res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: `git clone failed: ${msg}` }));
+              return;
+            }
+
+            // Detect package manager from lockfiles and install dependencies
+            const detectAndInstall = async (dir: string) => {
+              try {
+                await fs.access(path.join(dir, 'pnpm-lock.yaml'));
+                console.log('[MCP Server] Detected pnpm lockfile, running pnpm install');
+                await execAsync('pnpm install', { cwd: dir, timeout: 300000 });
+                return;
+              } catch {}
+              try {
+                await fs.access(path.join(dir, 'yarn.lock'));
+                console.log('[MCP Server] Detected yarn lockfile, running yarn install');
+                await execAsync('yarn install', { cwd: dir, timeout: 300000 });
+                return;
+              } catch {}
+              try {
+                await fs.access(path.join(dir, 'package.json'));
+                console.log('[MCP Server] Detected package.json, running npm install');
+                await execAsync('npm install', { cwd: dir, timeout: 300000 });
+              } catch {}
+            };
+            await detectAndInstall(projectPath);
+
+            // Save git config for future commits
+            const gitConfig = { gitRepository: repoUrl, gitHubToken, gitUserName, gitUserEmail };
+            await this.saveProjectGitConfig(projectPath, gitConfig);
+
+            // Configure git user in the cloned repo
+            if (gitUserName) {
+              try { await execAsync(`git config user.name "${gitUserName}"`, { cwd: projectPath }); } catch {}
+            }
+            if (gitUserEmail) {
+              try { await execAsync(`git config user.email "${gitUserEmail}"`, { cwd: projectPath }); } catch {}
+            }
+
+            if (supabase) {
+              try {
+                await supabase.from('automated_builds').update({
+                  cursor_project_path: projectPath,
+                  github_repository_url: repoUrl,
+                  status: 'running',
+                  updated_at: new Date().toISOString(),
+                }).eq('id', buildId);
+                await supabase.from('build_logs').insert({
+                  build_id: buildId, log_type: 'build_log', message: `Repository cloned successfully to ${projectPath}`, created_at: new Date().toISOString(),
+                });
+              } catch (e) {
+                console.warn('[MCP Server] clone-project: failed to update DB:', e);
+              }
+            }
+
+            console.log(`[MCP Server] Clone complete: ${projectPath}`);
+            res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ success: true, projectPath, gitRepository: repoUrl }));
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+          }
+        });
+        return;
+      }
+
       // POST /api/execute-prompt
       if (req.method === 'POST' && (urlPath === '/api/execute-prompt' || urlPath === '/api/execute-prompt/')) {
         console.error('[MCP Server] POST /api/execute-prompt received');
@@ -6723,6 +6842,7 @@ module.exports = {
         url: urlPath,
         availableEndpoints: [
           '/api/create-project',
+          '/api/clone-project',
           '/api/execute-prompt',
           '/api/start-build',
           '/api/health',
@@ -6745,6 +6865,7 @@ module.exports = {
       console.error(`ScopesFlow Cursor MCP Server running on http://${host}:${port}`);
       console.error(`HTTP endpoints:`);
       console.error(`  POST   http://${host}:${port}/api/create-project`);
+      console.error(`  POST   http://${host}:${port}/api/clone-project`);
       console.error(`  POST   http://${host}:${port}/api/execute-prompt`);
       console.error(`  POST   http://${host}:${port}/api/start-build`);
       console.error(`  GET    http://${host}:${port}/api/health`);
