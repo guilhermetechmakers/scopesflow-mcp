@@ -6317,14 +6317,16 @@ module.exports = {
                 : createClient(supabaseUrl, anonKey as string, { global: { headers: { Authorization: `Bearer ${accessToken}` } } });
             }
 
-            const parentDir = path.dirname(projectPath);
+            const resolvedProjectPath = path.resolve(projectPath);
+            const parentDir = path.dirname(resolvedProjectPath);
+            const projectDirName = path.basename(resolvedProjectPath);
             await fs.mkdir(parentDir, { recursive: true });
 
             const authUrl = repoUrl.replace('https://', `https://x-access-token:${gitHubToken}@`);
             const cloneBranch = branch || 'main';
-            const cloneCmd = `git clone --branch ${cloneBranch} --single-branch "${authUrl}" "${projectPath}"`;
+            const cloneCmd = `git clone --branch ${cloneBranch} --single-branch "${authUrl}" "${projectDirName}"`;
 
-            console.log(`[MCP Server] Cloning repo to ${projectPath} (branch: ${cloneBranch})`);
+            console.log(`[MCP Server] Cloning repo to ${resolvedProjectPath} (branch: ${cloneBranch})`);
             try {
               await execAsync(cloneCmd, { cwd: parentDir, timeout: 300000 });
             } catch (cloneErr: any) {
@@ -6358,39 +6360,39 @@ module.exports = {
                 await execAsync('npm install', { cwd: dir, timeout: 300000 });
               } catch {}
             };
-            await detectAndInstall(projectPath);
+            await detectAndInstall(resolvedProjectPath);
 
             // Save git config for future commits
             const gitConfig = { gitRepository: repoUrl, gitHubToken, gitUserName, gitUserEmail };
-            await this.saveProjectGitConfig(projectPath, gitConfig);
+            await this.saveProjectGitConfig(resolvedProjectPath, gitConfig);
 
             // Configure git user in the cloned repo
             if (gitUserName) {
-              try { await execAsync(`git config user.name "${gitUserName}"`, { cwd: projectPath }); } catch {}
+              try { await execAsync(`git config user.name "${gitUserName}"`, { cwd: resolvedProjectPath }); } catch {}
             }
             if (gitUserEmail) {
-              try { await execAsync(`git config user.email "${gitUserEmail}"`, { cwd: projectPath }); } catch {}
+              try { await execAsync(`git config user.email "${gitUserEmail}"`, { cwd: resolvedProjectPath }); } catch {}
             }
 
             if (supabase) {
               try {
                 await supabase.from('automated_builds').update({
-                  cursor_project_path: projectPath,
+                  cursor_project_path: resolvedProjectPath,
                   github_repository_url: repoUrl,
                   status: 'running',
                   updated_at: new Date().toISOString(),
                 }).eq('id', buildId);
                 await supabase.from('build_logs').insert({
-                  build_id: buildId, log_type: 'build_log', message: `Repository cloned successfully to ${projectPath}`, created_at: new Date().toISOString(),
+                  build_id: buildId, log_type: 'build_log', message: `Repository cloned successfully to ${resolvedProjectPath}`, created_at: new Date().toISOString(),
                 });
               } catch (e) {
                 console.warn('[MCP Server] clone-project: failed to update DB:', e);
               }
             }
 
-            console.log(`[MCP Server] Clone complete: ${projectPath}`);
+            console.log(`[MCP Server] Clone complete: ${resolvedProjectPath}`);
             res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
-            res.end(JSON.stringify({ success: true, projectPath, gitRepository: repoUrl }));
+            res.end(JSON.stringify({ success: true, projectPath: resolvedProjectPath, gitRepository: repoUrl }));
           } catch (e) {
             res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
             res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
