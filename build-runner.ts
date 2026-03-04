@@ -429,6 +429,9 @@ export async function runBuildLoop(
         
         if (currentAgentPhase === 'feedback') {
           // Feedback phase: only load feedback-sourced, unimplemented prompts
+          // When feedbackSessionId is set (Re-process), run only prompts from that session
+          const feedbackSessionId = configObj.feedbackSessionId as string | undefined;
+
           const { data: feedbackRows, error: feedbackError } = await supabase
             .from('flowchart_items')
             .select('id, prompt, prompt_content, sequence_order, elements')
@@ -444,10 +447,17 @@ export async function runBuildLoop(
 
           if (Array.isArray(feedbackRows)) {
             // Filter in code for elements.source === 'feedback' (avoids PostgREST JSONB filter issues)
-            const feedbackOnly = feedbackRows.filter(
+            let feedbackOnly = feedbackRows.filter(
               (r: { elements?: { source?: string } }) => r.elements?.source === 'feedback'
             );
-            log(`Feedback flowchart_items: ${feedbackRows.length} total unimplemented, ${feedbackOnly.length} with source=feedback`);
+            // Re-process: only prompts from this session
+            if (feedbackSessionId) {
+              feedbackOnly = feedbackOnly.filter(
+                (r: { elements?: { session_id?: string } }) => r.elements?.session_id === feedbackSessionId
+              );
+              log(`Feedback session-scoped: ${feedbackOnly.length} prompts for session ${feedbackSessionId}`);
+            }
+            log(`Feedback flowchart_items: ${feedbackRows.length} total unimplemented, ${feedbackOnly.length} with source=feedback${feedbackSessionId ? ` (session ${feedbackSessionId})` : ''}`);
             await appendLog(`Found ${feedbackOnly.length} feedback prompts to execute`);
 
             const mapped = feedbackOnly
@@ -1229,6 +1239,14 @@ export async function runBuildLoop(
       await supabase.from('automated_builds').update({
         feedback_completed_at: new Date().toISOString(),
       }).eq('id', buildId);
+
+      // Clear feedbackSessionId so future runs are not accidentally session-scoped
+      const { data: cfgRow } = await supabase.from('automated_builds').select('configuration').eq('id', buildId).single();
+      if (cfgRow?.configuration && typeof cfgRow.configuration === 'object') {
+        const cfg = { ...(cfgRow.configuration as Record<string, unknown>) };
+        delete cfg.feedbackSessionId;
+        await supabase.from('automated_builds').update({ configuration: cfg }).eq('id', buildId);
+      }
 
       await appendLog(`Feedback Agent phase completed. ${feedbackTotal} prompts executed.`);
     }
