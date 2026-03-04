@@ -2487,14 +2487,19 @@ Analyze the existing project structure and implement the task following the patt
         // Use --print flag for non-interactive mode, --force to allow commands
         // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
         const modelArg = args.model || 'composer-1.5';
-        command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
+        // --api-key flag takes explicit precedence over any stored login session on the VPS,
+        // ensuring the user's own Cursor credits are consumed rather than the server owner's.
+        const apiKeyFlag = args.cursorApiKey ? `--api-key "${args.cursorApiKey}"` : '';
+        command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
       } else {
         // Save prompt to file for Unix-like systems too
         const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
         await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
         
         const modelArg = args.model || 'composer-1.5';
-        command = `cat .cursor-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
+        // --api-key flag takes explicit precedence over any stored login session on the VPS
+        const apiKeyFlag = args.cursorApiKey ? `--api-key "${args.cursorApiKey}"` : '';
+        command = `cat .cursor-prompt.tmp | cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
       }
       
       await appendBuildLog('Starting Cursor Agent...');
@@ -2649,7 +2654,7 @@ Analyze the existing project structure and implement the task following the patt
           console.log(`[MCP Server] ${validationResult.summary}`);
           console.log(`[MCP Server] Error count: ${validationResult.errors.length}`);
           
-          const fixResult = await this.autoFixBuildErrors(actualProjectPath, validationResult, 0, args.model);
+          const fixResult = await this.autoFixBuildErrors(actualProjectPath, validationResult, 0, args.model, args.provider, args.cursorApiKey);
           
           if (fixResult.success) {
             await appendBuildLog('Build validation auto-fix completed');
@@ -3647,6 +3652,7 @@ This task was created by ScopesFlow automation. To complete:
     retryCount: number = 0,
     model?: string,
     provider?: 'cursor' | 'claude-code',
+    cursorApiKey?: string,
   ): Promise<{ success: boolean; message: string }> {
     console.log(`[MCP Server] 🔧 Auto-fixing build errors (attempt ${retryCount + 1}/${this.MAX_BUILD_FIX_RETRIES})...`);
     
@@ -3732,9 +3738,11 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
             .replace(/^([A-Z]):/i, (match: string, drive: string) => `/mnt/${drive.toLowerCase()}`);
 
           const wslPromptFile = wslProjectPath + '/.cursor-fix-prompt.tmp';
-          command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
+          const apiKeyFlag = cursorApiKey ? `--api-key "${cursorApiKey}"` : '';
+          command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
         } else {
-          command = `cat .cursor-fix-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
+          const apiKeyFlag = cursorApiKey ? `--api-key "${cursorApiKey}"` : '';
+          command = `cat .cursor-fix-prompt.tmp | cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
         }
 
         console.log(`[MCP Server] Executing cursor-agent to fix errors...`);
@@ -3742,7 +3750,9 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         await this.executeCursorAgentStreaming(
           command,
           isWindows ? undefined : actualProjectPath,
-          300000
+          300000,
+          undefined,
+          cursorApiKey,
         );
 
         try {
@@ -3771,13 +3781,13 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         console.log(`[MCP Server] ⚠️ Build still has errors after fix attempt`);
         
         // Retry with incremented count
-        return await this.autoFixBuildErrors(actualProjectPath, validationResult, retryCount + 1, model);
+        return await this.autoFixBuildErrors(actualProjectPath, validationResult, retryCount + 1, model, provider, cursorApiKey);
       }
     } catch (error: any) {
       console.error(`[MCP Server] ❌ Auto-fix attempt ${retryCount + 1} failed:`, error.message);
       
       // Retry
-      return await this.autoFixBuildErrors(projectPath, errorDetails, retryCount + 1, model);
+      return await this.autoFixBuildErrors(projectPath, errorDetails, retryCount + 1, model, provider, cursorApiKey);
     }
   }
 

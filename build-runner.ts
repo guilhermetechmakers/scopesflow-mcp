@@ -4,6 +4,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { runDesignAgent } from './design-agent-runner.js';
 import { runDebugAgent } from './debug-agent-runner.js';
 import { runScopeCheckAgent } from './scope-check-agent-runner.js';
+import { decryptCursorApiKey } from './crypto-utils.js';
 
 /** Config passed to create-project (matches server CursorProjectConfig shape). */
 export interface BuildCursorConfig {
@@ -1363,8 +1364,16 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
         if (row.revoked_at) {
           console.warn('[BuildRunner] ⚠️ Cursor API key has been revoked');
         } else if (row.api_key_ciphertext) {
-          cursorApiKey = row.api_key_ciphertext;
-          console.log('[BuildRunner] ✅ Cursor API key loaded for user');
+          try {
+            cursorApiKey = decryptCursorApiKey(row.api_key_ciphertext);
+            console.log('[BuildRunner] ✅ Cursor API key decrypted successfully — user credits will be used');
+          } catch (decryptErr) {
+            console.warn(
+              '[BuildRunner] ⚠️ Failed to decrypt Cursor API key:',
+              decryptErr instanceof Error ? decryptErr.message : 'unknown error'
+            );
+            // cursorApiKey stays undefined; build will fail below if MCP_REQUIRE_CURSOR_API_KEY=true
+          }
           try {
             await dbClient.from('cursor_api_keys').update({ last_used_at: new Date().toISOString() }).eq('user_id', user.id);
           } catch { /* non-blocking */ }
