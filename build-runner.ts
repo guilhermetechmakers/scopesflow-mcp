@@ -165,7 +165,7 @@ export async function runBuildLoop(
   buildId: string,
   options: RunBuildLoopOptions
 ): Promise<void> {
-  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker, cursorApiKey, provider, shouldStop } = options;
+  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker, cursorApiKey, provider, shouldStop, feedbackSessionId: optionsFeedbackSessionId } = options;
 
   const log = (message: string, level: 'info' | 'error' = 'info') => {
     console.error(`[BuildRunner] ${message}`);
@@ -429,8 +429,10 @@ export async function runBuildLoop(
         
         if (currentAgentPhase === 'feedback') {
           // Feedback phase: only load feedback-sourced, unimplemented prompts
-          // When feedbackSessionId is set (Re-process), run only prompts from that session
-          const feedbackSessionId = configObj.feedbackSessionId as string | undefined;
+          // When feedbackSessionId is set (Re-process / extension), run only prompts from that session
+          // Prefer payload (reliable) over DB config (timing/structure issues)
+          const feedbackSessionId =
+            optionsFeedbackSessionId ?? (configObj.feedbackSessionId as string | undefined);
 
           const { data: feedbackRows, error: feedbackError } = await supabase
             .from('flowchart_items')

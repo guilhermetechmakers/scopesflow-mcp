@@ -6096,6 +6096,9 @@ module.exports = {
     if (supabaseServiceRoleKey) {
       workerEnv['MCP_SUPABASE_SERVICE_ROLE_KEY'] = supabaseServiceRoleKey;
     }
+    if (feedbackSessionId) {
+      workerEnv['FEEDBACK_SESSION_ID'] = feedbackSessionId;
+    }
     if (process.env.MCP_BUILD_API_KEY) {
       workerEnv['MCP_BUILD_API_KEY'] = process.env.MCP_BUILD_API_KEY;
     }
