@@ -1355,7 +1355,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
   }
 
   private validateExecutePromptArgs(args: Record<string, unknown>): ExecutePromptArgs {
-    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId, promptId, provider } = args;
+    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId, promptId, model, cursorApiKey, provider } = args;
 
     if (typeof prompt !== 'string') throw new Error('Prompt must be a string');
     if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
@@ -1377,6 +1377,8 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       userId: typeof userId === 'string' ? userId : undefined,
       buildId: typeof buildId === 'string' ? buildId : undefined,
       promptId: typeof promptId === 'string' ? promptId : undefined,
+      model: typeof model === 'string' ? model : undefined,
+      cursorApiKey: typeof cursorApiKey === 'string' ? cursorApiKey : undefined,
       provider: provider === 'claude-code' ? 'claude-code' : provider === 'cursor' ? 'cursor' : undefined,
     };
   }
@@ -6432,11 +6434,13 @@ module.exports = {
           try {
             console.log('[MCP Server] 🔍 DEBUG: Parsing request body, length=', body.length);
             const data = JSON.parse(body || '{}') as {
-              buildId?: string; projectId?: string; promptId?: string; promptContent?: string; projectPath?: string;
+              buildId?: string; projectId?: string; promptId?: string; promptContent?: string; prompt?: string; projectPath?: string;
               timeout?: number; context?: string; supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
-              provider?: 'cursor' | 'claude-code';
+              provider?: 'cursor' | 'claude-code'; model?: string; cursorApiKey?: string;
             };
-            const { buildId, projectId, promptId, promptContent, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey, provider } = data;
+            const { buildId, projectId, promptId, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey, provider, model, cursorApiKey } = data;
+            // Accept both field names: promptContent (build-phase callers) and prompt (build-worker)
+            const promptContent = data.promptContent ?? data.prompt;
             
             console.log('[MCP Server] 🔍 DEBUG: Parsed request - buildId=', buildId, 'projectId=', projectId, 'projectPath=', projectPath);
             console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasPromptContent=', !!promptContent, 'promptLength=', promptContent?.length || 0);
@@ -6464,7 +6468,7 @@ module.exports = {
               try {
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Calling executePrompt...');
                 const execRes = await this.executePrompt(this.validateExecutePromptArgs({
-                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined, promptId, provider,
+                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined, promptId, provider, model, cursorApiKey,
                 }));
                 
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - executePrompt returned, parsing result...');
