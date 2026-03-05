@@ -36,11 +36,16 @@ MCP_SERVER_HOST=localhost
 # Set MCP_BUILD_API_KEY to match Supabase Edge Function secret for POST /api/start-build.
 # MCP_BUILD_API_KEY=your-long-random-secret
 
-# Cursor API key - server-level fallback (REQUIRED for automated builds)
-# This is used when a user does not yet have a per-user key saved in Supabase Settings.
-# Per-user keys stored in Supabase always take priority over this value.
-# On Windows/WSL this key is injected into the WSL environment via `export CURSOR_API_KEY=...`
-# to avoid cmd.exe double-quote parsing issues.
+# ── Cursor API Key (automated builds) ──────────────────────────────
+# OPTION A (recommended): provide the encryption secret so per-user keys
+# stored in Supabase can be decrypted at build time.
+# Must be the same 64-hex-char value set in Supabase Dashboard →
+# Edge Functions → Secrets → CURSOR_KEYS_ENCRYPTION_SECRET.
+CURSOR_KEYS_ENCRYPTION_SECRET=your-64-hex-char-secret-here
+
+# OPTION B (simpler fallback): a single server-level Cursor API key.
+# Used automatically whenever per-user decryption fails or no key is found.
+# Per-user keys (Option A) always take priority over this value.
 CURSOR_API_KEY=your-cursor-api-key-here
 ```
 

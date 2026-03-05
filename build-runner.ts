@@ -1392,19 +1392,39 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
               '[BuildRunner] ⚠️ Failed to decrypt Cursor API key:',
               decryptErr instanceof Error ? decryptErr.message : 'unknown error'
             );
-            // cursorApiKey stays undefined; build will fail below if MCP_REQUIRE_CURSOR_API_KEY=true
+            // Fall back to server-level CURSOR_API_KEY env var (e.g. when CURSOR_KEYS_ENCRYPTION_SECRET is not set on this server)
+            const envFallback = process.env.CURSOR_API_KEY?.trim();
+            if (envFallback) {
+              cursorApiKey = envFallback;
+              console.log('[BuildRunner] ✅ Using server-level CURSOR_API_KEY env var as fallback (decryption failed)');
+            }
           }
           try {
             await dbClient.from('cursor_api_keys').update({ last_used_at: new Date().toISOString() }).eq('user_id', user.id);
           } catch { /* non-blocking */ }
         } else {
           console.warn('[BuildRunner] ⚠️ Cursor API key row found but api_key_ciphertext is empty');
+          const envFallback = process.env.CURSOR_API_KEY?.trim();
+          if (envFallback) {
+            cursorApiKey = envFallback;
+            console.log('[BuildRunner] ✅ Using server-level CURSOR_API_KEY env var as fallback (empty ciphertext)');
+          }
         }
       } else {
         console.warn(`[BuildRunner] ⚠️ No Cursor API key found for user_id: ${user.id}`);
+        const envFallback = process.env.CURSOR_API_KEY?.trim();
+        if (envFallback) {
+          cursorApiKey = envFallback;
+          console.log('[BuildRunner] ✅ Using server-level CURSOR_API_KEY env var as fallback (no DB row)');
+        }
       }
     } catch (error) {
       console.warn('[BuildRunner] ⚠️ Exception fetching Cursor API key:', error instanceof Error ? error.message : 'Unknown error');
+      const envFallback = process.env.CURSOR_API_KEY?.trim();
+      if (envFallback) {
+        cursorApiKey = envFallback;
+        console.log('[BuildRunner] ✅ Using server-level CURSOR_API_KEY env var as fallback (fetch exception)');
+      }
     }
 
     if (!cursorApiKey && process.env.MCP_REQUIRE_CURSOR_API_KEY === 'true') {
