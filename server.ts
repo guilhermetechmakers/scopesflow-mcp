@@ -2489,18 +2489,21 @@ Analyze the existing project structure and implement the task following the patt
         // Use --print flag for non-interactive mode, --force to allow commands
         // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
         const modelArg = args.model || 'composer-1.5';
-        // --api-key flag takes explicit precedence over any stored login session on the VPS,
-        // ensuring the user's own Cursor credits are consumed rather than the server owner's.
-        const apiKeyFlag = args.cursorApiKey ? `--api-key "${args.cursorApiKey}"` : '';
-        command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
+        // Resolve effective key: per-user Supabase key takes priority, then server-level env fallback.
+        const effectiveKey = args.cursorApiKey ?? process.env.CURSOR_API_KEY;
+        // Use export inside the bash -c string (single-quoted value) instead of --api-key "..." because
+        // double quotes inside a double-quoted bash -c string break cmd.exe parsing on Windows.
+        const wslEnvPrefix = effectiveKey ? `export CURSOR_API_KEY='${effectiveKey}' && ` : '';
+        command = `wsl -d Ubuntu bash -c "${wslEnvPrefix}cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
       } else {
         // Save prompt to file for Unix-like systems too
         const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
         await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
         
         const modelArg = args.model || 'composer-1.5';
-        // --api-key flag takes explicit precedence over any stored login session on the VPS
-        const apiKeyFlag = args.cursorApiKey ? `--api-key "${args.cursorApiKey}"` : '';
+        // Resolve effective key: per-user Supabase key takes priority, then server-level env fallback.
+        const effectiveKey = args.cursorApiKey ?? process.env.CURSOR_API_KEY;
+        const apiKeyFlag = effectiveKey ? `--api-key '${effectiveKey}'` : '';
         command = `cat .cursor-prompt.tmp | cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
       }
       
@@ -3884,9 +3887,10 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       console.log('[MCP Server] Starting cursor-agent with streaming output...');
       addLog('info', 'Starting cursor-agent with streaming output');
       
-      // Build env with optional per-user Cursor API key
-      const spawnEnv = cursorApiKey
-        ? { ...process.env, CURSOR_API_KEY: cursorApiKey }
+      // Build env with per-user key taking priority, then server-level env fallback.
+      const effectiveSpawnKey = cursorApiKey ?? process.env.CURSOR_API_KEY;
+      const spawnEnv = effectiveSpawnKey
+        ? { ...process.env, CURSOR_API_KEY: effectiveSpawnKey }
         : process.env;
 
       // Spawn the process (empty args array to avoid DEP0190 deprecation with shell: true)

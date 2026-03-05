@@ -35,6 +35,13 @@ MCP_SERVER_HOST=localhost
 # On VPS set MCP_SERVER_HOST=0.0.0.0 so nginx can reach the server.
 # Set MCP_BUILD_API_KEY to match Supabase Edge Function secret for POST /api/start-build.
 # MCP_BUILD_API_KEY=your-long-random-secret
+
+# Cursor API key - server-level fallback (REQUIRED for automated builds)
+# This is used when a user does not yet have a per-user key saved in Supabase Settings.
+# Per-user keys stored in Supabase always take priority over this value.
+# On Windows/WSL this key is injected into the WSL environment via `export CURSOR_API_KEY=...`
+# to avoid cmd.exe double-quote parsing issues.
+CURSOR_API_KEY=your-cursor-api-key-here
 ```
 
 ⚠️ **Important:** Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key from https://platform.openai.com/api-keys
