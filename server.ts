@@ -6558,6 +6558,24 @@ module.exports = {
               if (payloadUserId && serviceRoleKey) {
                 resolvedUserId = payloadUserId;
                 console.log('[MCP Server] 🔍 DEBUG: HTTP handler - resolvedUserId from trusted payload=', resolvedUserId);
+              } else if (serviceRoleKey && projectId) {
+                // DB lookup: derive user_id from projects table using the projectId already in
+                // the request. Works with any edge function version that sends serviceRoleKey.
+                try {
+                  const { data: projectRow, error: projectError } = await supabase
+                    .from('projects')
+                    .select('user_id')
+                    .eq('id', projectId)
+                    .maybeSingle();
+                  if (projectError) {
+                    console.warn('[MCP Server] ⚠️ DEBUG: HTTP handler - project lookup failed:', projectError.message);
+                  } else if (projectRow?.user_id) {
+                    resolvedUserId = projectRow.user_id;
+                    console.log('[MCP Server] 🔍 DEBUG: HTTP handler - resolvedUserId from DB project lookup=', resolvedUserId);
+                  }
+                } catch (lookupErr) {
+                  console.warn('[MCP Server] ⚠️ DEBUG: HTTP handler - project lookup exception:', lookupErr instanceof Error ? lookupErr.message : String(lookupErr));
+                }
               } else if (accessToken) {
                 try {
                   const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
