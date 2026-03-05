@@ -1,4 +1,4 @@
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+﻿import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { exec, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
@@ -9,6 +9,7 @@ import * as dotenv from 'dotenv';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { WebSocketServer } from 'ws';
 import { runBuildFromPayload, runBuildLoop, type ActiveBuildEntry } from './build-runner.js';
+import { decryptCursorApiKey } from './crypto-utils.js';
 import { AppRunner } from './app-runner.js';
 import { BuildOrchestrator, type WorkerSession } from './build-orchestrator.js';
 
@@ -60,7 +61,7 @@ interface ExecutePromptArgs {
   buildId?: string;          // NEW: When set, server appends to build_logs for realtime following
   model?: string;            // NEW: Model to use for cursor-agent (defaults to "composer-1.5")
   cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
-  promptId?: string;         // NEW: Flowchart prompt ID — included in mcp_log for correct marking on completion
+  promptId?: string;         // NEW: Flowchart prompt ID â€” included in mcp_log for correct marking on completion
   provider?: 'cursor' | 'claude-code'; // AI provider: cursor-agent or claude CLI
 }
 interface ProjectPathArgs {
@@ -171,7 +172,7 @@ class CursorMCPServer {
 - Font weights: Regular for body, bold for headings and navigation
 - Headings: Large, left-aligned, clear hierarchy (H1 > H2 > H3)
 - Body text: Medium size, high readability, generous letter-spacing
-- Spacing: Consistent 16px–24px paddings and margins, with tight vertical rhythm
+- Spacing: Consistent 16pxâ€“24px paddings and margins, with tight vertical rhythm
 - Layout: Grid-based, modular, clear separation of sidebar, main content, and secondary panels
 - Alignment: Left-aligned text; centralized cards and charts
 
@@ -179,7 +180,7 @@ class CursorMCPServer {
 
 ### Card Design:
 - Background: Solid dark gray (#232427)
-- Borders: Thin, subtle (#2D2E31), with slightly rounded corners (6px–8px radius)
+- Borders: Thin, subtle (#2D2E31), with slightly rounded corners (6pxâ€“8px radius)
 - Shadows: Minimal or none, flat with slight elevation via border contrast
 - Hover state: Slight lift or outline highlight (#3B82F6)
 - Visual hierarchy: Title bold and prominent, description subdued, actions at the bottom
@@ -209,20 +210,20 @@ This interface embodies:
 - User experience goals: Reduce cognitive load, promote intuitive navigation, deliver a premium and trustworthy feel, and support rapid task completion with minimal distractions
 - Visual strategy: Emphasizes functional elegance, accessibility, and a workspace-like environment tailored for high-productivity teams`);
 
-    console.log('[MCP Server] ✅ Initialized default design patterns');
+    console.log('[MCP Server] âœ… Initialized default design patterns');
   }
 
   private storeDesignPattern(id: string, pattern: string): void {
     this.designPatternStorage.set(id, pattern);
-    console.log(`[MCP Server] ✅ Stored design pattern: ${id} (${pattern.length} chars)`);
+    console.log(`[MCP Server] âœ… Stored design pattern: ${id} (${pattern.length} chars)`);
   }
 
   private getDesignPattern(id: string): string | undefined {
     const pattern = this.designPatternStorage.get(id);
     if (pattern) {
-      console.log(`[MCP Server] ✅ Retrieved design pattern: ${id} (${pattern.length} chars)`);
+      console.log(`[MCP Server] âœ… Retrieved design pattern: ${id} (${pattern.length} chars)`);
     } else {
-      console.log(`[MCP Server] ❌ Design pattern not found: ${id}`);
+      console.log(`[MCP Server] âŒ Design pattern not found: ${id}`);
     }
     return pattern;
   }
@@ -230,15 +231,15 @@ This interface embodies:
   // Temporary Design Pattern Storage Methods
   private storeTemporaryDesignPattern(projectId: string, pattern: string): void {
     this.temporaryDesignPatternStorage.set(projectId, pattern);
-    console.log(`[MCP Server] ✅ Stored temporary design pattern for project: ${projectId} (${pattern.length} chars)`);
+    console.log(`[MCP Server] âœ… Stored temporary design pattern for project: ${projectId} (${pattern.length} chars)`);
   }
 
   private getTemporaryDesignPattern(projectId: string): string | undefined {
     const pattern = this.temporaryDesignPatternStorage.get(projectId);
     if (pattern) {
-      console.log(`[MCP Server] ✅ Retrieved temporary design pattern for project: ${projectId} (${pattern.length} chars)`);
+      console.log(`[MCP Server] âœ… Retrieved temporary design pattern for project: ${projectId} (${pattern.length} chars)`);
     } else {
-      console.log(`[MCP Server] ❌ Temporary design pattern not found for project: ${projectId}`);
+      console.log(`[MCP Server] âŒ Temporary design pattern not found for project: ${projectId}`);
     }
     return pattern;
   }
@@ -246,7 +247,7 @@ This interface embodies:
   private cleanupTemporaryDesignPattern(projectId: string): void {
     const deleted = this.temporaryDesignPatternStorage.delete(projectId);
     if (deleted) {
-      console.log(`[MCP Server] ✅ Cleaned up temporary design pattern for project: ${projectId}`);
+      console.log(`[MCP Server] âœ… Cleaned up temporary design pattern for project: ${projectId}`);
     }
   }
 
@@ -299,10 +300,10 @@ This interface embodies:
       
       const { stdout } = await execAsync(command);
       this.cursorAgentAvailable = true;
-      console.log(`[MCP Server] ✓ Cursor Agent CLI detected and available (version: ${stdout.trim()})`);
+      console.log(`[MCP Server] âœ“ Cursor Agent CLI detected and available (version: ${stdout.trim()})`);
     } catch (error) {
       this.cursorAgentAvailable = false;
-      console.warn('[MCP Server] ⚠ Cursor Agent CLI not found.');
+      console.warn('[MCP Server] âš  Cursor Agent CLI not found.');
       if (process.platform === 'win32') {
         console.warn('[MCP Server] Install with: wsl -d Ubuntu bash -c "curl https://cursor.com/install -fsS | bash"');
       } else {
@@ -322,10 +323,10 @@ This interface embodies:
         : 'claude --version';
 
       const { stdout } = await execAsync(versionCmd);
-      console.log(`[MCP Server] ✓ Claude Code CLI detected (version: ${stdout.trim()})`);
+      console.log(`[MCP Server] âœ“ Claude Code CLI detected (version: ${stdout.trim()})`);
     } catch {
       this.claudeCodeAvailable = false;
-      console.warn('[MCP Server] ⚠ Claude Code CLI not found.');
+      console.warn('[MCP Server] âš  Claude Code CLI not found.');
       console.warn('[MCP Server] Install with: npm install -g @anthropic-ai/claude-code');
       return;
     }
@@ -337,10 +338,10 @@ This interface embodies:
 
       await execAsync(authCmd);
       this.claudeCodeAvailable = true;
-      console.log('[MCP Server] ✓ Claude Code CLI authenticated and ready');
+      console.log('[MCP Server] âœ“ Claude Code CLI authenticated and ready');
     } catch {
       this.claudeCodeAvailable = false;
-      console.warn('[MCP Server] ⚠ Claude Code CLI found but NOT authenticated.');
+      console.warn('[MCP Server] âš  Claude Code CLI found but NOT authenticated.');
       console.warn('[MCP Server] Run: claude auth login');
     }
   }
@@ -483,15 +484,15 @@ ${isExpoProject ? '- Create custom hooks in \`src/hooks/\` for data fetching' : 
 
 ### Edge Functions (Preferred for Server-Side Logic)
 - Use Supabase Edge Functions (Deno runtime) instead of custom API routes whenever possible
-- Edge Functions run on Deno Deploy — use \`Deno.serve()\` and import from \`https://esm.sh/\` or npm specifiers
+- Edge Functions run on Deno Deploy â€” use \`Deno.serve()\` and import from \`https://esm.sh/\` or npm specifiers
 - Place Edge Functions in \`supabase/functions/<function-name>/index.ts\`
 - Use \`supabase functions serve\` for local development and \`supabase functions deploy\` for production
-- Edge Functions have access to \`Deno.env.get()\` for secrets — store secrets via \`supabase secrets set\`
+- Edge Functions have access to \`Deno.env.get()\` for secrets â€” store secrets via \`supabase secrets set\`
 - Use Edge Functions for: webhooks, third-party API calls, data processing, scheduled tasks, and any logic that should not run on the client
 
 ### Authentication
 - Use Supabase Auth for all authentication flows (email/password, OAuth, magic link)
-- Implement Row-Level Security (RLS) policies on all tables — never rely solely on client-side auth checks
+- Implement Row-Level Security (RLS) policies on all tables â€” never rely solely on client-side auth checks
 - Use \`supabase.auth.getSession()\` and \`supabase.auth.onAuthStateChange()\` to manage session state
 - Protect routes and API calls by verifying the user session
 
@@ -502,18 +503,18 @@ ${isExpoProject ? '- Create custom hooks in \`src/hooks/\` for data fetching' : 
 - Leverage Supabase Storage for file uploads (images, documents)
 
 ### Security
-- Enable RLS on every table — no exceptions
+- Enable RLS on every table â€” no exceptions
 - Use \`auth.uid()\` in RLS policies to scope data access to the authenticated user
 - Validate all inputs with Zod before sending to Supabase
-- Never trust client-side data — validate and sanitize in Edge Functions
+- Never trust client-side data â€” validate and sanitize in Edge Functions
 
 ## API Integrations
 
-**When building any third-party API integration, ALWAYS search the web for the latest official documentation first.** Do not rely on memorized or outdated API knowledge — APIs change frequently.
+**When building any third-party API integration, ALWAYS search the web for the latest official documentation first.** Do not rely on memorized or outdated API knowledge â€” APIs change frequently.
 
 ### Rules for API Integrations
 1. **Search docs first:** Before writing any integration code, look up the current official API documentation, SDKs, and changelog for the service
-2. **Always use Edge Functions:** All API integrations with external services MUST be implemented as Supabase Edge Functions — never call third-party APIs directly from the client
+2. **Always use Edge Functions:** All API integrations with external services MUST be implemented as Supabase Edge Functions â€” never call third-party APIs directly from the client
 3. **Never expose API keys on the client:** Store all API keys and secrets using \`supabase secrets set\` and access them via \`Deno.env.get()\` inside Edge Functions
 4. **Use official SDKs when available:** Prefer the official SDK/client library for the service (import via \`npm:\` specifier or \`https://esm.sh/\` in Deno)
 5. **Handle rate limits and errors:** Implement retry logic with exponential backoff, respect rate limit headers, and return meaningful error responses to the client
@@ -523,7 +524,7 @@ ${isExpoProject ? '- Create custom hooks in \`src/hooks/\` for data fetching' : 
 
 ### Edge Function Integration Pattern
 \`\`\`
-supabase/functions/<service-name>/index.ts   → the Edge Function entry point
+supabase/functions/<service-name>/index.ts   â†’ the Edge Function entry point
 \`\`\`
 - Accept structured JSON from the client, validate with Zod
 - Call the external API using fetch or the official SDK
@@ -559,15 +560,15 @@ ${designReferenceContent}
 
 ### 1. Radius Scale (Not Random Corner Values)
 - 2px: tiny elements (badges, checkboxes)
-- 4–6px: inputs, buttons
-- 8–12px: cards, menus, modals
+- 4â€“6px: inputs, buttons
+- 8â€“12px: cards, menus, modals
 - 999px / 50%: pills, avatars
 
 ### 2. Shadows as Elevation (Not Decoration)
 - Flat content = no shadow (use border/spacing)
 - Movable cards / hover surfaces = light shadow
 - Menus / popovers / dialogs = stronger overlay shadow
-- Use a few clear elevation levels: base (0), raised card (1), overlay/modal (2–3)
+- Use a few clear elevation levels: base (0), raised card (1), overlay/modal (2â€“3)
 
 ### 3. Dark Mode: Shadows Are Not Enough
 - Use surface color shifts + shadow (higher surfaces are lighter in dark mode)
@@ -591,7 +592,7 @@ ${designReferenceContent}
 - Spacing creates hierarchy and grouping (without extra borders/shadows)
 
 ### 7. Design Tokens for Everything Visual
-- Never hardcode visual values — use semantic design tokens
+- Never hardcode visual values â€” use semantic design tokens
 - Tokens for: color, radius, spacing, elevation, border
 - Enables easy theme changes, consistent UI across platforms, cleaner handoff
 - Semantic names: \`surface\`, \`surface-raised\`, \`border-default\`, \`radius-md\`, etc.
@@ -609,12 +610,12 @@ ${designReferenceContent}
 
 ### 10. Blur/Glass Effects: Sparingly and Intentionally
 - Use backdrop-filter only for: overlays, command palettes, sticky bars, side panels
-- Not entire pages — keep contrast high
+- Not entire pages â€” keep contrast high
 - Controlled usage only
 
 ### 11. Respect Reduced Motion
 - Use motion to support feedback and hierarchy only
-- Support \`prefers-reduced-motion\` — reduce or remove animation/transitions for users who request it
+- Support \`prefers-reduced-motion\` â€” reduce or remove animation/transitions for users who request it
 
 ### Modern Default Setup (Baseline)
 - **Radius:** 4 / 8 / 12 / full
@@ -709,7 +710,7 @@ ${isMobile ? '- Use bottom tab navigation or drawer navigation' : '- Use collaps
 ${isMobile ? '- Implement scrollable lists with pull-to-refresh' : '- Implement data tables with sorting, filtering, and pagination'}
 - Create metric cards with trend indicators
 ${isMobile ? '- Use React Native chart libraries (victory-native, react-native-chart-kit)' : '- Use charts (Recharts) for data visualization'}
-${isMobile ? '- Ensure full-screen layouts optimized for mobile screens' : '- Ensure responsive layout (sidebar → drawer on mobile)'}
+${isMobile ? '- Ensure full-screen layouts optimized for mobile screens' : '- Ensure responsive layout (sidebar â†’ drawer on mobile)'}
 - Add loading states for data fetching
 `;
     } else if (patternLower.includes('landing') || patternLower.includes('marketing')) {
@@ -767,9 +768,9 @@ ${isExpoProject ? '2. Use NativeWind for styling' : '2. Use Motion library for a
 ${isExpoProject ? '3. Use React Native components (View, Text, etc.)' : '3. Import Inter font in CSS'}
 4. Use \`@/\` path aliases
 ${isExpoProject ? '5. Handle safe areas for iOS and Android' : '5. Follow mobile-first responsive design'}
-6. Every project uses Supabase — initialize client in \`src/lib/supabase.ts\`
+6. Every project uses Supabase â€” initialize client in \`src/lib/supabase.ts\`
 7. Prefer Supabase Edge Functions over custom API routes for server-side logic
-8. Enable RLS on every table — no exceptions
+8. Enable RLS on every table â€” no exceptions
 
 ## Supabase Integration
 - Use \`@supabase/supabase-js\` with typed client (generate types via \`supabase gen types typescript\`)
@@ -779,8 +780,8 @@ ${isExpoProject ? '5. Handle safe areas for iOS and Android' : '5. Follow mobile
 - Validate inputs with Zod before sending to Supabase
 
 ## API Integrations
-- **ALWAYS search the web for the latest official API documentation before building any integration** — never rely on outdated or memorized knowledge
-- All third-party API integrations MUST use Supabase Edge Functions — never call external APIs from the client
+- **ALWAYS search the web for the latest official API documentation before building any integration** â€” never rely on outdated or memorized knowledge
+- All third-party API integrations MUST use Supabase Edge Functions â€” never call external APIs from the client
 - Store API keys via \`supabase secrets set\`, access with \`Deno.env.get()\` inside Edge Functions
 - Use official SDKs when available (import via \`npm:\` or \`https://esm.sh/\` in Deno)
 - Implement retry logic with exponential backoff and handle rate limits
@@ -1410,10 +1411,10 @@ See DESIGN_RULES.md in the server root for complete guidelines.
     if (config.designPatternId) {
       const storedPattern = this.getTemporaryDesignPattern(config.designPatternId);
       if (storedPattern) {
-        console.log(`[MCP Server] ✅ Using stored design pattern for project: ${config.designPatternId}`);
+        console.log(`[MCP Server] âœ… Using stored design pattern for project: ${config.designPatternId}`);
         return storedPattern;
       } else {
-        console.log(`[MCP Server] ⚠️ Design pattern ID provided but not found in storage: ${config.designPatternId}`);
+        console.log(`[MCP Server] âš ï¸ Design pattern ID provided but not found in storage: ${config.designPatternId}`);
       }
     }
     
@@ -1422,7 +1423,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       // Generate a unique project ID based on project name and path
       const projectId = `${config.projectName}-${config.projectPath}`.replace(/[^a-zA-Z0-9-]/g, '-');
       this.storeTemporaryDesignPattern(projectId, config.designPatternStore);
-      console.log(`[MCP Server] ✅ Using direct design pattern storage for project: ${projectId}`);
+      console.log(`[MCP Server] âœ… Using direct design pattern storage for project: ${projectId}`);
       return config.designPatternStore;
     }
     
@@ -1430,14 +1431,14 @@ See DESIGN_RULES.md in the server root for complete guidelines.
     if (config.designPatternId) {
       const serverPattern = this.getDesignPattern(config.designPatternId);
       if (serverPattern) {
-        console.log(`[MCP Server] ✅ Using predefined design pattern: ${config.designPatternId}`);
+        console.log(`[MCP Server] âœ… Using predefined design pattern: ${config.designPatternId}`);
         return serverPattern;
       }
     }
     
     // Fourth priority: Complete design reference document
     if (config.designReference) {
-      console.log(`[MCP Server] ✅ Using design reference document`);
+      console.log(`[MCP Server] âœ… Using design reference document`);
       return config.designReference;
     }
     
@@ -1449,23 +1450,23 @@ See DESIGN_RULES.md in the server root for complete guidelines.
     if (config.designPhilosophy) sections.push(`## Design Philosophy\n\n${config.designPhilosophy}`);
     
     if (sections.length > 0) {
-      console.log(`[MCP Server] ✅ Using section-based design pattern (${sections.length} sections)`);
+      console.log(`[MCP Server] âœ… Using section-based design pattern (${sections.length} sections)`);
       return sections.join('\n\n---\n\n');
     }
     
     // Fallback to deprecated parameters
     if (config.designPatternSummary && config.designPatternDetails) {
-      console.log(`[MCP Server] ✅ Using deprecated design pattern summary + details`);
+      console.log(`[MCP Server] âœ… Using deprecated design pattern summary + details`);
       return `${config.designPatternSummary}\n\n${config.designPatternDetails}`;
     } else if (config.designPatternSummary) {
-      console.log(`[MCP Server] ✅ Using deprecated design pattern summary`);
+      console.log(`[MCP Server] âœ… Using deprecated design pattern summary`);
       return config.designPatternSummary;
     } else if (config.designPattern) {
-      console.log(`[MCP Server] ✅ Using deprecated design pattern`);
+      console.log(`[MCP Server] âœ… Using deprecated design pattern`);
       return config.designPattern;
     }
     
-    console.log(`[MCP Server] ⚠️ No design pattern provided`);
+    console.log(`[MCP Server] âš ï¸ No design pattern provided`);
     return undefined;
   }
 
@@ -1554,7 +1555,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       if (!config.gitRepository && config.gitHubToken) {
         const pathBasedName = path.basename(config.projectPath);
         const sanitizedName = this.sanitizeRepoNameForGitHub(pathBasedName);
-        console.log('[MCP Server] 📝 Auto-generating repository name from path:', pathBasedName, '->', sanitizedName);
+        console.log('[MCP Server] ðŸ“ Auto-generating repository name from path:', pathBasedName, '->', sanitizedName);
         
         // This will be used by the GitHub creation logic below
         config.gitRepository = `https://github.com/auto-generated/${sanitizedName}.git`;
@@ -1566,9 +1567,9 @@ See DESIGN_RULES.md in the server root for complete guidelines.
           const rawRepoName = this.extractRepoName(config.gitRepository);
           const repoName = this.sanitizeRepoNameForGitHub(rawRepoName);
           if (rawRepoName !== repoName) {
-            console.log('[MCP Server] 📝 Sanitized repo name for GitHub:', rawRepoName, '->', repoName);
+            console.log('[MCP Server] ðŸ“ Sanitized repo name for GitHub:', rawRepoName, '->', repoName);
           }
-          console.log('[MCP Server] 🚀 Creating GitHub repository...');
+          console.log('[MCP Server] ðŸš€ Creating GitHub repository...');
           
           const repoResult = await this.createGitHubRepository(
             repoName,
@@ -1579,14 +1580,14 @@ See DESIGN_RULES.md in the server root for complete guidelines.
           if (repoResult.success) {
             // Update gitRepository with actual URL from GitHub
             config.gitRepository = repoResult.repoUrl;
-            console.log('[MCP Server] ✅ Using GitHub repository:', repoResult.repoUrl);
+            console.log('[MCP Server] âœ… Using GitHub repository:', repoResult.repoUrl);
           } else {
-            console.warn('[MCP Server] ⚠️ GitHub repository creation failed, but continuing...');
-            console.warn('[MCP Server] ⚠️', repoResult.message);
+            console.warn('[MCP Server] âš ï¸ GitHub repository creation failed, but continuing...');
+            console.warn('[MCP Server] âš ï¸', repoResult.message);
           }
         } catch (repoError) {
-          console.error('[MCP Server] ❌ Error creating GitHub repository:', repoError);
-          console.warn('[MCP Server] ⚠️ Continuing without GitHub repository...');
+          console.error('[MCP Server] âŒ Error creating GitHub repository:', repoError);
+          console.warn('[MCP Server] âš ï¸ Continuing without GitHub repository...');
         }
       }
 
@@ -1602,20 +1603,20 @@ See DESIGN_RULES.md in the server root for complete guidelines.
         
         // Log configuration status for debugging
         if (config.gitHubToken && config.gitRepository) {
-          console.log('[MCP Server] ✅ Git configuration saved with repository URL');
+          console.log('[MCP Server] âœ… Git configuration saved with repository URL');
         } else if (config.gitHubToken && !config.gitRepository) {
-          console.warn('[MCP Server] ⚠️ GitHub token provided but no repository URL - commits will be local only');
+          console.warn('[MCP Server] âš ï¸ GitHub token provided but no repository URL - commits will be local only');
         }
       }
 
       // Auto-commit initial project if GitHub token provided
       if (config.gitHubToken) {
         try {
-          console.log('[MCP Server] 🚀 Auto-committing initial project...');
+                console.log('[MCP Server] ðŸš€ Auto-committing initial project...');
           
           // Warn if repository URL is missing
           if (!config.gitRepository) {
-            console.warn('[MCP Server] ⚠️ No gitRepository provided - commit will be local only (no push to remote)');
+            console.warn('[MCP Server] âš ï¸ No gitRepository provided - commit will be local only (no push to remote)');
           }
           
           const commitMessage = `Initial commit: ${config.projectName}\n\nProject created with ScopesFlow automation using ${config.framework} framework.`;
@@ -1631,15 +1632,15 @@ See DESIGN_RULES.md in the server root for complete guidelines.
           );
           
           if (result.success) {
-            console.log(`[MCP Server] ✅ ${result.message}`);
+            console.log(`[MCP Server] âœ… ${result.message}`);
             if (result.changesCount && result.changesCount > 0) {
-              console.log(`[MCP Server] 📊 Committed ${result.changesCount} files`);
+              console.log(`[MCP Server] ðŸ“Š Committed ${result.changesCount} files`);
             }
           } else {
-            console.error(`[MCP Server] ❌ Initial commit failed: ${result.message}`);
+            console.error(`[MCP Server] âŒ Initial commit failed: ${result.message}`);
           }
         } catch (commitError) {
-          console.error('[MCP Server] ❌ Failed to commit initial project:', commitError);
+          console.error('[MCP Server] âŒ Failed to commit initial project:', commitError);
           // Don't fail project creation, just log the error
         }
       }
@@ -1659,11 +1660,11 @@ See DESIGN_RULES.md in the server root for complete guidelines.
         }
         
         await fs.writeFile(envPath, envContent, 'utf-8');
-        console.log(`[MCP Server] ✅ Created ${path.basename(envPath)} with Supabase credentials`);
+        console.log(`[MCP Server] âœ… Created ${path.basename(envPath)} with Supabase credentials`);
       }
 
       if (config.supabaseUrl && !config.supabaseAnonKey && config.supabaseServiceRoleKey) {
-        console.warn('[MCP Server] âš ï¸ Supabase anon key missing; skipping .env generation to avoid exposing service role key.');
+        console.warn('[MCP Server] Ã¢Å¡Â Ã¯Â¸Â Supabase anon key missing; skipping .env generation to avoid exposing service role key.');
       }
 
       // Create a basic README.md file to ensure the directory is properly initialized
@@ -1680,16 +1681,16 @@ See DESIGN_RULES.md in the server root for complete guidelines.
         const cursorRulesContent = await this.generateCursorRules(combinedDesignPattern, config.projectPath, config.framework);
         const projectRulesPath = path.join(cursorRulesDir, 'projectrules.mdc');
         await fs.writeFile(projectRulesPath, cursorRulesContent, 'utf-8');
-        console.log(`[MCP Server] ✅ Created .cursor/rules/projectrules.mdc${combinedDesignPattern ? ` with design pattern: ${combinedDesignPattern.substring(0, 50)}...` : ''}`);
+        console.log(`[MCP Server] âœ… Created .cursor/rules/projectrules.mdc${combinedDesignPattern ? ` with design pattern: ${combinedDesignPattern.substring(0, 50)}...` : ''}`);
 
         // Generate and write design_rules.md
         const designRulesContent = await this.generateDesignRules(combinedDesignPattern, config.framework);
         const designRulesPath = path.join(config.projectPath, 'design_rules.md');
         await fs.writeFile(designRulesPath, designRulesContent, 'utf-8');
-        console.log('[MCP Server] ✅ Created design_rules.md with pattern-specific guidelines');
+        console.log('[MCP Server] âœ… Created design_rules.md with pattern-specific guidelines');
         
       } catch (rulesError) {
-        console.warn('[MCP Server] ⚠️ Failed to create project rules and theme:', rulesError);
+        console.warn('[MCP Server] âš ï¸ Failed to create project rules and theme:', rulesError);
         // Don't fail the entire operation, but log the issue
       }
 
@@ -1698,18 +1699,18 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       if (config.framework !== 'react-expo' && !isHeadless) {
       try {
         await this.validateAndFixTailwindV3(config.projectPath);
-        console.log(`[MCP Server] ✅ Tailwind v3 validation completed for ${config.projectName}`);
+        console.log(`[MCP Server] âœ… Tailwind v3 validation completed for ${config.projectName}`);
       } catch (validationError) {
-        console.warn(`[MCP Server] ⚠️ Tailwind v3 validation failed for ${config.projectName}:`, validationError);
+        console.warn(`[MCP Server] âš ï¸ Tailwind v3 validation failed for ${config.projectName}:`, validationError);
         // Don't fail the entire operation, but log the issue
         }
       } else if (config.framework === 'react-expo') {
         // Setup NativeWind for Expo projects
         try {
           await this.setupNativeWindForExpo(config.projectPath);
-          console.log(`[MCP Server] ✅ NativeWind setup completed for ${config.projectName}`);
+          console.log(`[MCP Server] âœ… NativeWind setup completed for ${config.projectName}`);
         } catch (nativeWindError) {
-          console.warn(`[MCP Server] ⚠️ NativeWind setup failed for ${config.projectName}:`, nativeWindError);
+          console.warn(`[MCP Server] âš ï¸ NativeWind setup failed for ${config.projectName}:`, nativeWindError);
           // Don't fail the entire operation, but log the issue
         }
       }
@@ -1759,7 +1760,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
 
   // Extract design-specific content from user prompt
   private extractDesignContent(userPrompt: string): string {
-    console.log('[MCP Server] 🔍 Extracting design content from prompt...');
+    console.log('[MCP Server] ðŸ” Extracting design content from prompt...');
     
     // Search for design system prompt markers (case-insensitive)
     const markers = [
@@ -1775,14 +1776,14 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       if (match && match.index !== undefined) {
         const content = userPrompt.substring(match.index + match[0].length).trim();
         if (content.length > 0) {
-          console.log(`[MCP Server] ✅ Found design marker: "${match[0]}" - extracted ${content.length} characters`);
+          console.log(`[MCP Server] âœ… Found design marker: "${match[0]}" - extracted ${content.length} characters`);
           return content;
         }
       }
     }
     
     // Fallback: return full prompt for backward compatibility
-    console.log('[MCP Server] ⚠️ No design marker found, using full prompt');
+    console.log('[MCP Server] âš ï¸ No design marker found, using full prompt');
     return userPrompt;
   }
 
@@ -1793,9 +1794,9 @@ See DESIGN_RULES.md in the server root for complete guidelines.
     try {
       const masterDesignPath = path.join(process.cwd(), 'DESIGN_REFERENCE.md');
       masterDesignReference = await fs.readFile(masterDesignPath, 'utf-8');
-      console.log(`[MCP Server] ✅ Loaded master DESIGN_REFERENCE.md`);
+      console.log(`[MCP Server] âœ… Loaded master DESIGN_REFERENCE.md`);
     } catch (error) {
-      console.warn(`[MCP Server] ⚠️ Could not load DESIGN_REFERENCE.md, using fallback template:`, error);
+      console.warn(`[MCP Server] âš ï¸ Could not load DESIGN_REFERENCE.md, using fallback template:`, error);
       masterDesignReference = `# Modern Design Best Practices
 
 ## Note
@@ -1853,7 +1854,7 @@ When implementing this project:
 
     const designRefPath = path.join(projectPath, 'Design_reference.md');
     await fs.writeFile(designRefPath, designContent, 'utf-8');
-    console.log(`[MCP Server] ✅ Created Design_reference.md at ${designRefPath}`);
+    console.log(`[MCP Server] âœ… Created Design_reference.md at ${designRefPath}`);
   }
 
   /**
@@ -1870,7 +1871,7 @@ When implementing this project:
     }
     const content = `# Project Instructions
 
-- TypeScript strict mode — fix all type errors
+- TypeScript strict mode â€” fix all type errors
 - Use existing patterns, conventions, and file structure in the codebase
 - Do NOT start dev servers or run interactive/long-running commands
 - Do NOT run \`npm run dev\`, \`npm start\`, \`yarn dev\`, or similar
@@ -1880,7 +1881,7 @@ When implementing this project:
 - Prefer small, focused changes over large rewrites
 `;
     await fs.writeFile(claudeMdPath, content, 'utf-8');
-    console.log(`[MCP Server] ✅ Created CLAUDE.md at ${claudeMdPath}`);
+    console.log(`[MCP Server] âœ… Created CLAUDE.md at ${claudeMdPath}`);
   }
 
   private async executePrompt(args: ExecutePromptArgs) {
@@ -1929,7 +1930,7 @@ When implementing this project:
       }
 
       // Load existing git configuration and merge with provided parameters
-      console.log('[MCP Server] 🔍 Loading git configuration...');
+      console.log('[MCP Server] ðŸ” Loading git configuration...');
       const existingConfig = await this.loadProjectGitConfig(args.projectPath);
       let mergedConfig: ProjectGitConfig = {
         gitRepository: args.gitRepository || existingConfig?.gitRepository,
@@ -1941,7 +1942,7 @@ When implementing this project:
       // If GitHub token is still missing and we have Supabase client + user ID, fetch from DB
       if (!mergedConfig.gitHubToken && args.supabaseClient && args.userId) {
         try {
-          console.log(`[MCP Server] 🔍 Fetching GitHub auth from database for user_id: ${args.userId}`);
+          console.log(`[MCP Server] ðŸ” Fetching GitHub auth from database for user_id: ${args.userId}`);
           const { data: ghRow, error: ghError } = await args.supabaseClient
             .from('github_auth')
             .select('access_token')
@@ -1949,28 +1950,28 @@ When implementing this project:
             .maybeSingle();
           
           if (ghError) {
-            console.warn(`[MCP Server] ⚠️ Error fetching GitHub auth: ${ghError.message}`);
+            console.warn(`[MCP Server] âš ï¸ Error fetching GitHub auth: ${ghError.message}`);
           } else if (ghRow && typeof ghRow === 'object') {
             const row = ghRow as { access_token?: string };
             if (row.access_token) {
               mergedConfig.gitHubToken = row.access_token;
               // Note: login and email columns don't exist in github_auth table
               // gitUserName and gitUserEmail will remain from existing config or args if provided
-              console.log(`[MCP Server] ✅ Loaded GitHub auth from database (token: ${row.access_token.slice(0, 4)}...)`);
+              console.log(`[MCP Server] âœ… Loaded GitHub auth from database (token: ${row.access_token.slice(0, 4)}...)`);
             } else {
-              console.warn(`[MCP Server] ⚠️ GitHub auth row found but access_token is empty`);
+              console.warn(`[MCP Server] âš ï¸ GitHub auth row found but access_token is empty`);
             }
           } else {
-            console.warn(`[MCP Server] ⚠️ No GitHub auth found for user_id: ${args.userId}`);
+            console.warn(`[MCP Server] âš ï¸ No GitHub auth found for user_id: ${args.userId}`);
           }
         } catch (error) {
-          console.warn('[MCP Server] ⚠️ Exception fetching GitHub auth from database:', error instanceof Error ? error.message : 'Unknown error');
+          console.warn('[MCP Server] âš ï¸ Exception fetching GitHub auth from database:', error instanceof Error ? error.message : 'Unknown error');
         }
       } else if (!mergedConfig.gitHubToken) {
         if (!args.supabaseClient) {
-          console.warn('[MCP Server] ⚠️ No Supabase client provided - cannot fetch GitHub auth from DB');
+          console.warn('[MCP Server] âš ï¸ No Supabase client provided - cannot fetch GitHub auth from DB');
         } else if (!args.userId) {
-          console.warn('[MCP Server] ⚠️ No user ID provided - cannot fetch GitHub auth from DB');
+          console.warn('[MCP Server] âš ï¸ No user ID provided - cannot fetch GitHub auth from DB');
         }
       }
 
@@ -1989,9 +1990,51 @@ When implementing this project:
       await appendBuildLog('Git config loaded');
 
       const isCursorProvider = args.provider !== 'claude-code';
+      let effectiveCursorApiKey = typeof args.cursorApiKey === 'string' ? args.cursorApiKey.trim() : '';
+      let cursorApiKeySource: 'request' | 'db' | 'none' = effectiveCursorApiKey ? 'request' : 'none';
+
+      if (isCursorProvider && !effectiveCursorApiKey && args.supabaseClient && args.userId) {
+        try {
+          console.log(`[MCP Server] ðŸ” Fetching Cursor API key from DB for user_id: ${args.userId}`);
+          const { data: keyRow, error: keyError } = await args.supabaseClient
+            .from('cursor_api_keys')
+            .select('api_key_ciphertext, revoked_at')
+            .eq('user_id', args.userId)
+            .maybeSingle();
+
+          if (keyError) {
+            console.warn(`[MCP Server] âš ï¸ Error fetching Cursor API key: ${keyError.message}`);
+          } else if (keyRow && typeof keyRow === 'object') {
+            const row = keyRow as { api_key_ciphertext?: string; revoked_at?: string | null };
+            if (row.revoked_at) {
+              console.warn('[MCP Server] âš ï¸ Cursor API key has been revoked');
+            } else if (row.api_key_ciphertext) {
+              try {
+                effectiveCursorApiKey = decryptCursorApiKey(row.api_key_ciphertext);
+                cursorApiKeySource = 'db';
+                console.log('[MCP Server] âœ… Cursor API key decrypted from DB');
+              } catch (decryptErr) {
+                console.warn(
+                  '[MCP Server] âš ï¸ Failed to decrypt Cursor API key:',
+                  decryptErr instanceof Error ? decryptErr.message : 'unknown error'
+                );
+              }
+            } else {
+              console.warn('[MCP Server] âš ï¸ Cursor API key row found but api_key_ciphertext is empty');
+            }
+          } else {
+            console.warn(`[MCP Server] âš ï¸ No Cursor API key found for user_id: ${args.userId}`);
+          }
+        } catch (error) {
+          console.warn('[MCP Server] âš ï¸ Exception fetching Cursor API key:', error instanceof Error ? error.message : 'Unknown error');
+        }
+      } else if (isCursorProvider && !effectiveCursorApiKey && !args.userId) {
+        console.warn('[MCP Server] âš ï¸ No user ID provided - cannot fetch Cursor API key from DB');
+      }
+
       if (isCursorProvider) {
-        const hasCursorKey = typeof args.cursorApiKey === 'string' && args.cursorApiKey.trim().length > 0;
-        console.log(`[MCP Server] Cursor API key ${hasCursorKey ? 'provided' : 'missing'} (per-user only)`);
+        const hasCursorKey = !!effectiveCursorApiKey;
+        console.log(`[MCP Server] Cursor API key ${hasCursorKey ? 'provided' : 'missing'} (per-user only, source=${cursorApiKeySource})`);
         if (!hasCursorKey) {
           const msg = 'Cursor API key not configured for this user. Please add your key in Settings.';
           await appendBuildLog(msg, 'error');
@@ -2044,7 +2087,7 @@ When implementing this project:
         if (urlMatch && urlMatch[1]) {
           supabaseUrl = urlMatch[1].trim();
           hasSupabase = true;
-          console.log('[MCP Server] ✅ Detected Supabase configuration in .env.local');
+          console.log('[MCP Server] âœ… Detected Supabase configuration in .env.local');
           
           // Ensure migration structure exists
           await this.ensureSupabaseMigrationStructure(actualProjectPath);
@@ -2084,11 +2127,11 @@ CRUD REQUIREMENTS (for each data entity in the requirements):
 4. Follow patterns in SUPABASE_API_EXAMPLES.md
 
 EDGE FUNCTIONS - CREATE when feature requires:
-- LLM/AI features (chat, completions, embeddings) → create Edge Function, invoke via supabase.functions.invoke
-- Third-party APIs (Stripe, SendGrid, etc.) → create Edge Function
-- Webhooks (incoming) → create Edge Function
-- Heavy computation or server-only logic → create Edge Function
-DO NOT use Edge for: CRUD, Auth, Realtime, Storage — use Supabase client directly.
+- LLM/AI features (chat, completions, embeddings) â†’ create Edge Function, invoke via supabase.functions.invoke
+- Third-party APIs (Stripe, SendGrid, etc.) â†’ create Edge Function
+- Webhooks (incoming) â†’ create Edge Function
+- Heavy computation or server-only logic â†’ create Edge Function
+DO NOT use Edge for: CRUD, Auth, Realtime, Storage â€” use Supabase client directly.
 Never expose LLM or third-party API keys in the client.
 
 Note: Database migrations will be handled in subsequent prompts when database features are needed.
@@ -2125,17 +2168,17 @@ CRUD REQUIREMENTS (for each data entity):
 4. Follow patterns in SUPABASE_API_EXAMPLES.md
 
 EDGE FUNCTIONS - CREATE when feature requires:
-- LLM/AI features (chat, completions, embeddings) → create Edge Function, invoke via supabase.functions.invoke
-- Third-party APIs (Stripe, SendGrid, etc.) → create Edge Function
-- Webhooks (incoming) → create Edge Function
-- Heavy computation or server-only logic → create Edge Function
-DO NOT use Edge for: CRUD, Auth, Realtime, Storage — use Supabase client directly.
+- LLM/AI features (chat, completions, embeddings) â†’ create Edge Function, invoke via supabase.functions.invoke
+- Third-party APIs (Stripe, SendGrid, etc.) â†’ create Edge Function
+- Webhooks (incoming) â†’ create Edge Function
+- Heavy computation or server-only logic â†’ create Edge Function
+DO NOT use Edge for: CRUD, Auth, Realtime, Storage â€” use Supabase client directly.
 Never expose LLM or third-party API keys in the client.
 
 === DATABASE MIGRATION WORKFLOW (CRITICAL) ===
 
-⚠️ IMPORTANT: You NEVER execute SQL or push to Supabase directly!
-✅ You ONLY create migration files that will be reviewed and applied by the application.
+âš ï¸ IMPORTANT: You NEVER execute SQL or push to Supabase directly!
+âœ… You ONLY create migration files that will be reviewed and applied by the application.
 
 WHENEVER you create a feature requiring database tables, you MUST:
 
@@ -2143,8 +2186,8 @@ WHENEVER you create a feature requiring database tables, you MUST:
    Location: supabase/migrations/{timestamp}_{description}.sql
    Example: supabase/migrations/20241013120000_create_projects_table.sql
    
-   ⚠️ Use current timestamp in format: YYYYMMDDHHmmss
-   ⚠️ Use descriptive snake_case names
+   âš ï¸ Use current timestamp in format: YYYYMMDDHHmmss
+   âš ï¸ Use descriptive snake_case names
 
 2. **Migration File Template**
    \`\`\`sql
@@ -2297,14 +2340,14 @@ WHENEVER you create a feature requiring database tables, you MUST:
 
 === CRITICAL RULES ===
 
-❌ NEVER:
+âŒ NEVER:
 - Execute SQL directly
 - Run "npx supabase db push" or any Supabase CLI commands
 - Connect to the database
 - Apply migrations yourself
 - Use "psql" or any database client
 
-✅ ALWAYS:
+âœ… ALWAYS:
 - Create migration files in supabase/migrations/
 - Use timestamp prefix for ordering
 - Make migrations idempotent (IF NOT EXISTS, CREATE OR REPLACE)
@@ -2314,7 +2357,7 @@ WHENEVER you create a feature requiring database tables, you MUST:
 - Document with comments
 - Create corresponding TypeScript types
 
-⚠️ The application will:
+âš ï¸ The application will:
 - Review all migration SQL files
 - Display them to the user for approval
 - Apply them to Supabase when approved
@@ -2344,13 +2387,13 @@ Your job: Generate the files. Application's job: Execute them.
 
         if (reactBoilerplate && quickReference) {
           // Use full boilerplate documentation
-          directivePrompt = `⚠️ CRITICAL EXECUTION RULES - READ FIRST ⚠️
-❌ NEVER run: npm run dev, npm start, yarn dev, pnpm dev, or ANY development server
-❌ NEVER run: long-running processes, servers, or commands that don't exit
-❌ NEVER test the application by starting it
-✅ ALLOWED: npm install, npm run build, npm run test (if needed)
-✅ YOUR TASK: Create/modify files only, then STOP and EXIT immediately
-⚠️ The MCP server handles all testing and validation separately
+          directivePrompt = `âš ï¸ CRITICAL EXECUTION RULES - READ FIRST âš ï¸
+âŒ NEVER run: npm run dev, npm start, yarn dev, pnpm dev, or ANY development server
+âŒ NEVER run: long-running processes, servers, or commands that don't exit
+âŒ NEVER test the application by starting it
+âœ… ALLOWED: npm install, npm run build, npm run test (if needed)
+âœ… YOUR TASK: Create/modify files only, then STOP and EXIT immediately
+âš ï¸ The MCP server handles all testing and validation separately
 
 You are an expert full-stack developer proficient in TypeScript, React, Next.js, and modern UI/UX frameworks (Tailwind CSS, Shadcn UI, Radix UI).
 
@@ -2439,7 +2482,7 @@ START IMPLEMENTING NOW. Do not ask questions - analyze the existing project and 
           // Check if file exists first to avoid unnecessary error logs
           await fs.access(designRefPath);
           designReference = await fs.readFile(designRefPath, 'utf-8');
-          console.log('[MCP Server] ✓ Loaded Design_reference.md from project directory');
+          console.log('[MCP Server] âœ“ Loaded Design_reference.md from project directory');
         } catch (error) {
           // File doesn't exist in project - this is expected, try fallback
           console.log('[MCP Server] Design_reference.md not found in project, using MCP server boilerplate');
@@ -2447,21 +2490,21 @@ START IMPLEMENTING NOW. Do not ask questions - analyze the existing project and 
           
           // Only warn if fallback also fails
           if (!designReference) {
-            console.warn('[MCP Server] ⚠️ Could not load Design_reference.md from project or MCP server directory');
+            console.warn('[MCP Server] âš ï¸ Could not load Design_reference.md from project or MCP server directory');
           } else {
-            console.log('[MCP Server] ✓ Loaded DESIGN_REFERENCE.md from MCP server boilerplate');
+            console.log('[MCP Server] âœ“ Loaded DESIGN_REFERENCE.md from MCP server boilerplate');
           }
         }
         
         const successCriteria = await this.readBoilerplateFile('SUCCESS_CRITERIA.md');
         
-        directivePrompt = `⚠️ CRITICAL EXECUTION RULES - READ FIRST ⚠️
-❌ NEVER run: npm run dev, npm start, yarn dev, pnpm dev, or ANY development server
-❌ NEVER run: long-running processes, servers, or commands that don't exit
-❌ NEVER test the application by starting it
-✅ ALLOWED: npm install, npm run build, npm run test (if needed)
-✅ YOUR TASK: Create/modify files only, then STOP and EXIT immediately
-⚠️ The MCP server handles all testing and validation separately
+        directivePrompt = `âš ï¸ CRITICAL EXECUTION RULES - READ FIRST âš ï¸
+âŒ NEVER run: npm run dev, npm start, yarn dev, pnpm dev, or ANY development server
+âŒ NEVER run: long-running processes, servers, or commands that don't exit
+âŒ NEVER test the application by starting it
+âœ… ALLOWED: npm install, npm run build, npm run test (if needed)
+âœ… YOUR TASK: Create/modify files only, then STOP and EXIT immediately
+âš ï¸ The MCP server handles all testing and validation separately
 
 You are an expert full-stack developer proficient in TypeScript, React, Next.js, and modern UI/UX frameworks (Tailwind CSS, Shadcn UI, Radix UI).
 
@@ -2518,7 +2561,7 @@ Analyze the existing project structure and implement the task following the patt
         // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
         const modelArg = args.model || 'composer-1.5';
         // Per-user key only (no server fallback)
-        const effectiveKey = args.cursorApiKey?.trim();
+        const effectiveKey = effectiveCursorApiKey || '';
         // Use export inside the bash -c string (single-quoted value) instead of --api-key "..." because
         // double quotes inside a double-quoted bash -c string break cmd.exe parsing on Windows.
         const wslEnvPrefix = effectiveKey ? `export CURSOR_API_KEY='${effectiveKey}' && ` : '';
@@ -2571,19 +2614,19 @@ Analyze the existing project structure and implement the task following the patt
           stdout = result.stdout;
           stderr = result.stderr;
           cursorAgentLogs = result.logs;
-          console.log(`[MCP Server] 📊 Captured ${cursorAgentLogs.length} log entries from Claude Code`);
+          console.log(`[MCP Server] ðŸ“Š Captured ${cursorAgentLogs.length} log entries from Claude Code`);
         } else {
           const result = await this.executeCursorAgentStreaming(
             command,
             isWindows ? undefined : actualProjectPath,
             args.timeout || 300000,
             onBuildLog,
-            args.cursorApiKey,
+            effectiveCursorApiKey,
           );
           stdout = result.stdout;
           stderr = result.stderr;
           cursorAgentLogs = result.logs;
-          console.log(`[MCP Server] 📊 Captured ${cursorAgentLogs.length} log entries from cursor-agent`);
+          console.log(`[MCP Server] ðŸ“Š Captured ${cursorAgentLogs.length} log entries from cursor-agent`);
         }
       } catch (error: any) {
         const isTimeoutError = error.message?.includes('timed out') || 
@@ -2591,12 +2634,12 @@ Analyze the existing project structure and implement the task following the patt
                               error.message?.includes('terminating process');
         
         if (isTimeoutError) {
-          console.log('[MCP Server] 🚨 Timeout detected, activating fallback mechanism...');
+          console.log('[MCP Server] ðŸš¨ Timeout detected, activating fallback mechanism...');
           return await this.handleTimeoutWithFallback(args, startTime);
         }
         
         const providerLabel = args.provider === 'claude-code' ? 'Claude Code' : 'cursor-agent';
-        console.error(`[MCP Server] ⚠ ${providerLabel} error:`, error.message);
+        console.error(`[MCP Server] âš  ${providerLabel} error:`, error.message);
         throw error;
       }
       
@@ -2609,7 +2652,7 @@ Analyze the existing project structure and implement the task following the patt
 
       const providerName = args.provider === 'claude-code' ? 'Claude Code' : 'Cursor Agent';
       await appendBuildLog(`${providerName} execution completed`);
-      console.log(`[MCP Server] ✓ ${providerName} execution completed`);
+      console.log(`[MCP Server] âœ“ ${providerName} execution completed`);
       console.log(`[MCP Server] Output length: ${stdout.length} characters`);
       
       if (stderr) {
@@ -2618,16 +2661,16 @@ Analyze the existing project structure and implement the task following the patt
 
       // Wait for file system changes to stabilize after cursor-agent execution
       await appendBuildLog('Waiting for file system to stabilize...');
-      console.log(`[MCP Server] ⏳ Waiting for file system changes to stabilize...`);
+      console.log(`[MCP Server] â³ Waiting for file system changes to stabilize...`);
       await this.waitForFileSystemStability(actualProjectPath, 30000); // 30 second max wait
-      console.log(`[MCP Server] ✅ File system changes stabilized`);
+      console.log(`[MCP Server] âœ… File system changes stabilized`);
 
       // Get the files that were changed
       const filesChanged = await this.getChangedFiles(actualProjectPath);
       await appendBuildLog(`Files changed: ${filesChanged.length}`);
       
       console.log(`[MCP Server] ========================================`);
-      console.log(`[MCP Server] 📊 CURSOR AGENT RESULTS`);
+      console.log(`[MCP Server] ðŸ“Š CURSOR AGENT RESULTS`);
       console.log(`[MCP Server] ========================================`);
       console.log(`[MCP Server] Total files changed: ${filesChanged.length}`);
 
@@ -2637,11 +2680,11 @@ Analyze the existing project structure and implement the task following the patt
         Object.entries(categorized).forEach(([category, files]) => {
           if (files.length > 0) {
             console.log(`[MCP Server] ${category}:`);
-            files.forEach(file => console.log(`[MCP Server]   ✓ ${file}`));
+            files.forEach(file => console.log(`[MCP Server]   âœ“ ${file}`));
           }
         });
       } else {
-        console.log(`[MCP Server] ⚠️ No files were changed`);
+        console.log(`[MCP Server] âš ï¸ No files were changed`);
       }
       console.log(`[MCP Server] ========================================`);
 
@@ -2650,8 +2693,8 @@ Analyze the existing project structure and implement the task following the patt
           (l) => l.type === 'agent_completion' && l.message.includes('success')
         );
         if (!hasSuccessResult) {
-          const failMsg = 'Claude Code produced zero output and changed zero files — treating as failed execution.';
-          console.error(`[MCP Server] ❌ ${failMsg}`);
+          const failMsg = 'Claude Code produced zero output and changed zero files â€” treating as failed execution.';
+          console.error(`[MCP Server] âŒ ${failMsg}`);
           await appendBuildLog(failMsg, 'error');
           throw new Error(failMsg);
         }
@@ -2661,16 +2704,16 @@ Analyze the existing project structure and implement the task following the patt
       try {
         await this.validateAndFixTailwindV3(actualProjectPath);
         await appendBuildLog('Tailwind validation completed');
-        console.log(`[MCP Server] ✅ Post-generation Tailwind v3 validation completed`);
+        console.log(`[MCP Server] âœ… Post-generation Tailwind v3 validation completed`);
       } catch (validationError) {
-        console.warn(`[MCP Server] ⚠️ Post-generation Tailwind v3 validation failed:`, validationError);
+        console.warn(`[MCP Server] âš ï¸ Post-generation Tailwind v3 validation failed:`, validationError);
         // Don't fail the entire operation, but log the issue
       }
       
       // Validate build and dev server, auto-fix errors if found
       await appendBuildLog('Validating build and dev server...');
       console.log('[MCP Server] ========================================');
-      console.log('[MCP Server] 🔍 VALIDATING BUILD AND DEV SERVER');
+      console.log('[MCP Server] ðŸ” VALIDATING BUILD AND DEV SERVER');
       console.log('[MCP Server] ========================================');
       
       let buildValidationPassed = false;
@@ -2680,31 +2723,31 @@ Analyze the existing project structure and implement the task following the patt
         
         if (!validationResult.success) {
           await appendBuildLog(`Build validation failed: ${validationResult.summary}`, 'error');
-          console.log('[MCP Server] ⚠️ Build validation failed, initiating auto-fix...');
+          console.log('[MCP Server] âš ï¸ Build validation failed, initiating auto-fix...');
           console.log(`[MCP Server] ${validationResult.summary}`);
           console.log(`[MCP Server] Error count: ${validationResult.errors.length}`);
           
-          const fixResult = await this.autoFixBuildErrors(actualProjectPath, validationResult, 0, args.model, args.provider, args.cursorApiKey);
+          const fixResult = await this.autoFixBuildErrors(actualProjectPath, validationResult, 0, args.model, args.provider, effectiveCursorApiKey);
           
           if (fixResult.success) {
             await appendBuildLog('Build validation auto-fix completed');
-            console.log(`[MCP Server] ✅ ${fixResult.message}`);
+            console.log(`[MCP Server] âœ… ${fixResult.message}`);
             console.log('[MCP Server] Build validation and auto-fix completed successfully');
             buildValidationPassed = true;
           } else {
-            console.error(`[MCP Server] ❌ ${fixResult.message}`);
-            console.warn('[MCP Server] ⚠️ Will commit changes despite unresolved build errors to preserve work');
+            console.error(`[MCP Server] âŒ ${fixResult.message}`);
+            console.warn('[MCP Server] âš ï¸ Will commit changes despite unresolved build errors to preserve work');
             buildValidationPassed = false;
           }
         } else {
           await appendBuildLog('Build validation passed');
-          console.log('[MCP Server] ✅ Build validation passed - no errors detected');
+          console.log('[MCP Server] âœ… Build validation passed - no errors detected');
           buildValidationPassed = true;
         }
       } catch (validationError) {
         await appendBuildLog('Build validation check failed', 'error');
-        console.error('[MCP Server] ❌ Build validation check failed:', validationError);
-        console.warn('[MCP Server] ⚠️ Will commit changes despite validation failure to preserve work');
+        console.error('[MCP Server] âŒ Build validation check failed:', validationError);
+        console.warn('[MCP Server] âš ï¸ Will commit changes despite validation failure to preserve work');
         buildValidationPassed = false;
       }
       
@@ -2718,14 +2761,14 @@ Analyze the existing project structure and implement the task following the patt
         mergedConfig.gitUserName = mergedConfig.gitUserName || latestGitConfig.gitUserName;
         mergedConfig.gitUserEmail = mergedConfig.gitUserEmail || latestGitConfig.gitUserEmail;
         mergedConfig.gitRepository = mergedConfig.gitRepository || latestGitConfig.gitRepository;
-        console.log(`[MCP Server] ✅ Reloaded GitHub token from project config`);
+        console.log(`[MCP Server] âœ… Reloaded GitHub token from project config`);
       }
       
       // If still no token and we have Supabase client + user ID, try fetching from DB one more time
       if (!mergedConfig.gitHubToken) {
         if (args.supabaseClient && args.userId) {
           try {
-            console.log(`[MCP Server] 🔍 Final attempt: Fetching GitHub auth from database for user_id: ${args.userId}`);
+            console.log(`[MCP Server] ðŸ” Final attempt: Fetching GitHub auth from database for user_id: ${args.userId}`);
             const { data: ghRow, error: ghError } = await args.supabaseClient
               .from('github_auth')
               .select('access_token')
@@ -2733,7 +2776,7 @@ Analyze the existing project structure and implement the task following the patt
               .maybeSingle();
             
             if (ghError) {
-              console.warn(`[MCP Server] ⚠️ Error fetching GitHub auth (final attempt): ${ghError.message}`);
+              console.warn(`[MCP Server] âš ï¸ Error fetching GitHub auth (final attempt): ${ghError.message}`);
             } else if (ghRow && typeof ghRow === 'object') {
               const row = ghRow as { access_token?: string };
               if (row.access_token) {
@@ -2742,22 +2785,22 @@ Analyze the existing project structure and implement the task following the patt
                 // gitUserName and gitUserEmail will remain from existing config or args if provided
                 // Save to project config for future use
                 await this.saveProjectGitConfig(args.projectPath, mergedConfig);
-                console.log(`[MCP Server] ✅ Fetched and saved GitHub token from database (token: ${row.access_token.slice(0, 4)}...)`);
+                console.log(`[MCP Server] âœ… Fetched and saved GitHub token from database (token: ${row.access_token.slice(0, 4)}...)`);
               } else {
-                console.warn(`[MCP Server] ⚠️ GitHub auth row found but access_token is empty`);
+                console.warn(`[MCP Server] âš ï¸ GitHub auth row found but access_token is empty`);
               }
             } else {
-              console.warn(`[MCP Server] ⚠️ No GitHub auth found in database for user_id: ${args.userId}`);
+              console.warn(`[MCP Server] âš ï¸ No GitHub auth found in database for user_id: ${args.userId}`);
             }
           } catch (error) {
-            console.warn(`[MCP Server] ⚠️ Exception fetching GitHub auth (final attempt):`, error instanceof Error ? error.message : 'Unknown error');
+            console.warn(`[MCP Server] âš ï¸ Exception fetching GitHub auth (final attempt):`, error instanceof Error ? error.message : 'Unknown error');
           }
         } else {
           if (!args.supabaseClient) {
-            console.warn(`[MCP Server] ⚠️ Cannot fetch GitHub auth: Supabase client not provided`);
+            console.warn(`[MCP Server] âš ï¸ Cannot fetch GitHub auth: Supabase client not provided`);
           }
           if (!args.userId) {
-            console.warn(`[MCP Server] ⚠️ Cannot fetch GitHub auth: User ID not provided`);
+            console.warn(`[MCP Server] âš ï¸ Cannot fetch GitHub auth: User ID not provided`);
           }
         }
       }
@@ -2768,11 +2811,11 @@ Analyze the existing project structure and implement the task following the patt
           await appendBuildLog(`Committing ${filesChanged.length} changed files...`);
           // Warn if build validation failed but still commit
           if (!buildValidationPassed) {
-            console.warn('[MCP Server] ⚠️ Build has errors, but committing changes anyway to preserve work');
-            console.warn('[MCP Server] ⚠️ Please review and fix build errors in subsequent commits');
+            console.warn('[MCP Server] âš ï¸ Build has errors, but committing changes anyway to preserve work');
+            console.warn('[MCP Server] âš ï¸ Please review and fix build errors in subsequent commits');
           }
           
-          console.log(`[MCP Server] 🚀 Auto-committing ${filesChanged.length} changed files...`);
+          console.log(`[MCP Server] ðŸš€ Auto-committing ${filesChanged.length} changed files...`);
           
           const commitMessage = buildValidationPassed 
             ? `feat: AI-generated changes\n\n${args.prompt}`
@@ -2789,54 +2832,54 @@ Analyze the existing project structure and implement the task following the patt
           
           if (result.success) {
             await appendBuildLog(`Commit successful (${result.changesCount ?? filesChanged.length} files)`);
-            console.log(`[MCP Server] ✅ ${result.message}`);
+            console.log(`[MCP Server] âœ… ${result.message}`);
             if (result.changesCount && result.changesCount > 0) {
-              console.log(`[MCP Server] 📊 Committed ${result.changesCount} files`);
+              console.log(`[MCP Server] ðŸ“Š Committed ${result.changesCount} files`);
             }
             if (!buildValidationPassed) {
-              console.warn('[MCP Server] ⚠️ Changes committed despite build errors - review and fix manually');
+              console.warn('[MCP Server] âš ï¸ Changes committed despite build errors - review and fix manually');
             }
           } else {
             await appendBuildLog(`Auto-commit failed: ${result.message}`, 'error');
-            console.error(`[MCP Server] ❌ Auto-commit failed: ${result.message}`);
+            console.error(`[MCP Server] âŒ Auto-commit failed: ${result.message}`);
           }
         } catch (commitError) {
           await appendBuildLog('Auto-commit failed', 'error');
-          console.error('[MCP Server] ❌ Auto-commit failed:', commitError);
+          console.error('[MCP Server] âŒ Auto-commit failed:', commitError);
           // Don't fail the operation, just log the error and continue
         }
       } else if (!mergedConfig.gitHubToken) {
         await appendBuildLog('No GitHub token - skipping auto-commit');
-        console.log('[MCP Server] ℹ️ No GitHub token provided - skipping auto-commit');
+        console.log('[MCP Server] â„¹ï¸ No GitHub token provided - skipping auto-commit');
         console.log(`[MCP Server] Debug: supabaseClient=${!!args.supabaseClient}, userId=${args.userId || 'missing'}, projectPath=${args.projectPath}`);
       } else if (filesChanged.length === 0) {
         await appendBuildLog('No files changed - skipping commit');
-        console.log('[MCP Server] ℹ️ No files changed - skipping commit');
+        console.log('[MCP Server] â„¹ï¸ No files changed - skipping commit');
       }
       
       // Extract database migrations if any were created
       await appendBuildLog('Checking for new database migrations...');
-      console.log('[MCP Server] 🔍 Checking for new database migrations...');
+      console.log('[MCP Server] ðŸ” Checking for new database migrations...');
       const migrationsData = await this.extractNewMigrations(actualProjectPath);
 
       if (migrationsData.hasMigrations) {
         await appendBuildLog(`Found ${migrationsData.migrations.length} migration(s)`);
-        console.log(`[MCP Server] 📊 Found ${migrationsData.migrations.length} migration(s)`);
+        console.log(`[MCP Server] ðŸ“Š Found ${migrationsData.migrations.length} migration(s)`);
         migrationsData.migrations.forEach(m => {
-          console.log(`[MCP Server]   📄 ${m.filename}: ${m.description}`);
+          console.log(`[MCP Server]   ðŸ“„ ${m.filename}: ${m.description}`);
         });
       } else {
         await appendBuildLog('No new migrations detected');
-        console.log('[MCP Server] ℹ️ No new migrations detected');
+        console.log('[MCP Server] â„¹ï¸ No new migrations detected');
       }
       
       await appendBuildLog('Prompt step completed successfully');
 
       // Insert mcp_log with mcp_type='completed' so UI can detect step completion and move to next prompt
-      console.log('[MCP Server] 🔍 DEBUG: About to insert mcp_log completed');
-      console.log('[MCP Server] 🔍 DEBUG: buildId=', args.buildId || 'MISSING');
-      console.log('[MCP Server] 🔍 DEBUG: hasSupabaseClient=', !!args.supabaseClient);
-      console.log('[MCP Server] 🔍 DEBUG: projectPath=', args.projectPath);
+      console.log('[MCP Server] ðŸ” DEBUG: About to insert mcp_log completed');
+      console.log('[MCP Server] ðŸ” DEBUG: buildId=', args.buildId || 'MISSING');
+      console.log('[MCP Server] ðŸ” DEBUG: hasSupabaseClient=', !!args.supabaseClient);
+      console.log('[MCP Server] ðŸ” DEBUG: projectPath=', args.projectPath);
       
       if (args.buildId && args.supabaseClient) {
         try {
@@ -2846,12 +2889,12 @@ Analyze the existing project structure and implement the task following the patt
           try {
             const { data: { session } } = await args.supabaseClient.auth.getSession();
             if (session && session.expires_at && session.expires_at * 1000 < Date.now() + 60000) {
-              console.log('[MCP Server] 🔄 DEBUG: Token expiring soon, refreshing before mcp_log insert...');
+              console.log('[MCP Server] ðŸ”„ DEBUG: Token expiring soon, refreshing before mcp_log insert...');
               await args.supabaseClient.auth.refreshSession();
-              console.log('[MCP Server] ✅ DEBUG: Token refreshed successfully');
+              console.log('[MCP Server] âœ… DEBUG: Token refreshed successfully');
             }
           } catch (refreshError) {
-            console.warn('[MCP Server] ⚠️ DEBUG: Token refresh failed (non-blocking):', refreshError instanceof Error ? refreshError.message : String(refreshError));
+            console.warn('[MCP Server] âš ï¸ DEBUG: Token refresh failed (non-blocking):', refreshError instanceof Error ? refreshError.message : String(refreshError));
           }
           
           const insertPayload: Record<string, unknown> = {
@@ -2867,23 +2910,23 @@ Analyze the existing project structure and implement the task following the patt
           const insertResult = await args.supabaseClient.from('build_logs').insert(insertPayload);
           
           if (insertResult.error) {
-            console.error('[MCP Server] ❌ DEBUG: mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
+            console.error('[MCP Server] âŒ DEBUG: mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
             await appendBuildLog(`mcp_log insert failed: ${insertResult.error.message} (code: ${insertResult.error.code})`, 'error');
             
             // Note: If JWT expired, the HTTP handler will retry with service role key
             // This inner block can't access serviceRoleKey, so we rely on the HTTP handler fallback
           } else {
-            console.log('[MCP Server] ✅ DEBUG: mcp_log insert succeeded (inner executePrompt block)');
+            console.log('[MCP Server] âœ… DEBUG: mcp_log insert succeeded (inner executePrompt block)');
             await appendBuildLog('mcp_log completed inserted successfully (inner block)');
           }
         } catch (e) {
           const errorMsg = e instanceof Error ? e.message : String(e);
-          console.error('[MCP Server] ❌ DEBUG: mcp_log insert exception:', errorMsg);
+          console.error('[MCP Server] âŒ DEBUG: mcp_log insert exception:', errorMsg);
           console.warn('[MCP Server] Failed to insert completed mcp_log (non-blocking):', errorMsg);
           await appendBuildLog(`mcp_log insert exception: ${errorMsg}`, 'error');
         }
       } else {
-        console.warn('[MCP Server] ⚠️ DEBUG: Skipping mcp_log insert - buildId or supabaseClient missing');
+        console.warn('[MCP Server] âš ï¸ DEBUG: Skipping mcp_log insert - buildId or supabaseClient missing');
         await appendBuildLog(`Skipping mcp_log insert: buildId=${!!args.buildId}, supabaseClient=${!!args.supabaseClient}`, 'error');
       }
 
@@ -3027,7 +3070,7 @@ The application will extract migration files and provide a review/approval inter
 ---
 `;
       await fs.writeFile(migrationsDocPath, initialContent, 'utf-8');
-      console.log('[MCP Server] ✅ Created MIGRATIONS.md');
+      console.log('[MCP Server] âœ… Created MIGRATIONS.md');
     }
 
     // Create README.md for migrations directory
@@ -3073,7 +3116,7 @@ See existing migrations for examples.
 - Never execute SQL directly from development environment
 `;
       await fs.writeFile(readmePath, readmeContent, 'utf-8');
-      console.log('[MCP Server] ✅ Created migrations README.md');
+      console.log('[MCP Server] âœ… Created migrations README.md');
     }
   }
 
@@ -3184,8 +3227,8 @@ This task was created by ScopesFlow automation. To complete:
       
       await fs.writeFile(taskFile, taskContent, 'utf-8');
       
-      console.log(`[MCP Server] ✓ Task file created: ${taskFile}`);
-      console.log(`[MCP Server] ⚠ Manual intervention required - open project in Cursor IDE`);
+      console.log(`[MCP Server] âœ“ Task file created: ${taskFile}`);
+      console.log(`[MCP Server] âš  Manual intervention required - open project in Cursor IDE`);
 
       // Insert mcp_log with mcp_type='completed' so UI can detect step completion
       if (args.buildId && args.supabaseClient) {
@@ -3259,28 +3302,28 @@ This task was created by ScopesFlow automation. To complete:
     content: Array<{ type: string; text: string }>;
   }> {
     try {
-      console.log('[MCP Server] ========================================');
-      console.log('[MCP Server] 🚨 TIMEOUT FALLBACK ACTIVATED');
+                console.log('[MCP Server] ========================================');
+      console.log('[MCP Server] ðŸš¨ TIMEOUT FALLBACK ACTIVATED');
       console.log('[MCP Server] ========================================');
       
       // Capture partial work completed before timeout
       const partialWork = await this.capturePartialWork(args.projectPath, startTime);
       
       if (partialWork.hasPartialWork) {
-        console.log(`[MCP Server] ✅ Found partial work: ${partialWork.validFiles.length} valid files`);
+        console.log(`[MCP Server] âœ… Found partial work: ${partialWork.validFiles.length} valid files`);
         
         // Run Tailwind validation on partial work
         try {
           await this.validateAndFixTailwindV3(args.projectPath);
-          console.log('[MCP Server] ✅ Tailwind validation completed on partial work');
+          console.log('[MCP Server] âœ… Tailwind validation completed on partial work');
         } catch (validationError) {
-          console.warn('[MCP Server] ⚠️ Tailwind validation failed on partial work:', validationError);
+          console.warn('[MCP Server] âš ï¸ Tailwind validation failed on partial work:', validationError);
         }
         
         // Commit partial work if GitHub token is available
         if (args.gitHubToken) {
           try {
-            console.log('[MCP Server] 💾 Committing partial work...');
+                console.log('[MCP Server] ðŸ’¾ Committing partial work...');
             
             const commitMessage = `WIP: Partial completion (timeout)\n\n${args.prompt}\n\nNote: Operation timed out but partial work was completed. Files: ${partialWork.validFiles.join(', ')}`;
             
@@ -3294,19 +3337,19 @@ This task was created by ScopesFlow automation. To complete:
             );
             
             if (commitResult.success) {
-              console.log(`[MCP Server] ✅ Partial work committed: ${commitResult.message}`);
+              console.log(`[MCP Server] âœ… Partial work committed: ${commitResult.message}`);
             } else {
-              console.error(`[MCP Server] ❌ Failed to commit partial work: ${commitResult.message}`);
+              console.error(`[MCP Server] âŒ Failed to commit partial work: ${commitResult.message}`);
             }
           } catch (commitError) {
-            console.error('[MCP Server] ❌ Error committing partial work:', commitError);
+            console.error('[MCP Server] âŒ Error committing partial work:', commitError);
           }
         }
         
         // Check if we should retry (max 1 retry)
         const retryCount = args.retryCount || 0;
         if (retryCount < 1) {
-          console.log('[MCP Server] 🔄 Retrying with longer timeout...');
+          console.log('[MCP Server] ðŸ”„ Retrying with longer timeout...');
           
           // Create retry args with longer timeout
           const retryArgs: ExecutePromptArgs = {
@@ -3320,16 +3363,16 @@ This task was created by ScopesFlow automation. To complete:
           // Retry the operation
           return await this.executePrompt(retryArgs);
         } else {
-          console.log('[MCP Server] ⚠️ Max retries reached, falling back to task file');
+          console.log('[MCP Server] âš ï¸ Max retries reached, falling back to task file');
           return await this.executePromptFallback(args, startTime);
         }
       } else {
-        console.log('[MCP Server] ⚠️ No partial work found, checking retry options...');
+        console.log('[MCP Server] âš ï¸ No partial work found, checking retry options...');
         
         // Check if we should retry (max 1 retry)
         const retryCount = args.retryCount || 0;
         if (retryCount < 1) {
-          console.log('[MCP Server] 🔄 Retrying with longer timeout (no partial work)...');
+          console.log('[MCP Server] ðŸ”„ Retrying with longer timeout (no partial work)...');
           
           // Create retry args with longer timeout
           const retryArgs: ExecutePromptArgs = {
@@ -3343,12 +3386,12 @@ This task was created by ScopesFlow automation. To complete:
           // Retry the operation
           return await this.executePrompt(retryArgs);
         } else {
-          console.log('[MCP Server] ⚠️ Max retries reached, falling back to task file');
+          console.log('[MCP Server] âš ï¸ Max retries reached, falling back to task file');
           return await this.executePromptFallback(args, startTime);
         }
       }
     } catch (error) {
-      console.error('[MCP Server] ❌ Error in timeout fallback handler:', error);
+      console.error('[MCP Server] âŒ Error in timeout fallback handler:', error);
       
       // Fall back to task file creation
       return await this.executePromptFallback(args, startTime);
@@ -3364,14 +3407,14 @@ This task was created by ScopesFlow automation. To complete:
     const errors: string[] = [];
     const lines = output.split('\n');
     
-    console.log(`[MCP Server] 🔍 Parsing ${lines.length} lines of build output for errors`);
+    console.log(`[MCP Server] ðŸ” Parsing ${lines.length} lines of build output for errors`);
     
     // Comprehensive error patterns for TypeScript, Vite, and build tools
     const errorPatterns = [
       /error TS\d+:/i,                    // TypeScript errors
       /ERROR in /i,                       // Webpack errors
       /\bError:\s/i,                      // General errors (word boundary to avoid false positives)
-      /✘ \[ERROR\]/i,                     // Vite errors
+      /âœ˜ \[ERROR\]/i,                     // Vite errors
       /\[vite\] error:/i,                 // Vite specific
       /Module not found:/i,               // Missing module errors
       /Cannot find module/i,              // Import errors
@@ -3385,8 +3428,8 @@ This task was created by ScopesFlow automation. To complete:
       /TypeError:/i,                      // Type errors in runtime
       /ReferenceError:/i,                 // Reference errors
       /SyntaxError:/i,                    // Syntax errors
-      /⨯ /,                               // Vite/Next.js error indicator
-      /❌/,                                // Error emoji
+      /â¨¯ /,                               // Vite/Next.js error indicator
+      /âŒ/,                                // Error emoji
     ];
     
     let captureContext = false;
@@ -3447,13 +3490,13 @@ This task was created by ScopesFlow automation. To complete:
     
     // If no structured errors found but output contains error indicators, capture full output
     if (errors.length === 0 && (output.toLowerCase().includes('error') || output.includes('failed'))) {
-      console.log('[MCP Server] ⚠️ No structured errors captured, but output contains error keywords');
+      console.log('[MCP Server] âš ï¸ No structured errors captured, but output contains error keywords');
       // Try to find the most relevant section
       const relevantLines = lines.filter(line => 
         line.toLowerCase().includes('error') || 
         line.toLowerCase().includes('failed') ||
-        line.includes('⨯') ||
-        line.includes('✘')
+        line.includes('â¨¯') ||
+        line.includes('âœ˜')
       );
       
       if (relevantLines.length > 0) {
@@ -3464,7 +3507,7 @@ This task was created by ScopesFlow automation. To complete:
     
     const hasErrors = errors.length > 0;
     
-    console.log(`[MCP Server] 📊 Captured ${errorCount} error block(s)`);
+    console.log(`[MCP Server] ðŸ“Š Captured ${errorCount} error block(s)`);
     if (errors.length > 0) {
       console.log(`[MCP Server] First error preview: ${errors[0].substring(0, 300)}...`);
     }
@@ -3485,7 +3528,7 @@ This task was created by ScopesFlow automation. To complete:
     output: string;
     summary: string;
   }> {
-    console.log('[MCP Server] 🔍 Validating build and dev server...');
+    console.log('[MCP Server] ðŸ” Validating build and dev server...');
     
     let buildOutput = '';
     let devOutput = '';
@@ -3498,10 +3541,10 @@ This task was created by ScopesFlow automation. To complete:
         timeout: this.BUILD_TIMEOUT
       });
       buildOutput = stdout + '\n' + stderr;
-      console.log('[MCP Server] ✅ Build command completed');
+      console.log('[MCP Server] âœ… Build command completed');
     } catch (error: any) {
       buildOutput = (error.stdout || '') + '\n' + (error.stderr || '');
-      console.log('[MCP Server] ❌ Build command failed');
+      console.log('[MCP Server] âŒ Build command failed');
       
       const parsed = this.parseErrorOutput(buildOutput);
       if (parsed.hasErrors) {
@@ -3540,11 +3583,11 @@ This task was created by ScopesFlow automation. To complete:
         };
       }
     } catch (error: any) {
-      console.log('[MCP Server] ⚠️ Dev server check failed:', error.message);
+      console.log('[MCP Server] âš ï¸ Dev server check failed:', error.message);
       // Dev server failures are less critical, log but continue
     }
     
-    console.log('[MCP Server] ✅ Build and dev server validation passed');
+    console.log('[MCP Server] âœ… Build and dev server validation passed');
     return {
       success: true,
       errors: [],
@@ -3684,7 +3727,7 @@ This task was created by ScopesFlow automation. To complete:
     provider?: 'cursor' | 'claude-code',
     cursorApiKey?: string,
   ): Promise<{ success: boolean; message: string }> {
-    console.log(`[MCP Server] 🔧 Auto-fixing build errors (attempt ${retryCount + 1}/${this.MAX_BUILD_FIX_RETRIES})...`);
+    console.log(`[MCP Server] ðŸ”§ Auto-fixing build errors (attempt ${retryCount + 1}/${this.MAX_BUILD_FIX_RETRIES})...`);
     
     if (retryCount >= this.MAX_BUILD_FIX_RETRIES) {
       return {
@@ -3724,7 +3767,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       
       // Ensure npm install has been run before attempting fixes
       // This resolves common issues with missing dependencies or TypeScript not being found
-      console.log('[MCP Server] 🔍 Ensuring dependencies are installed...');
+      console.log('[MCP Server] ðŸ” Ensuring dependencies are installed...');
       try {
         if (isWindows) {
           // Run npm install in WSL for Windows projects
@@ -3741,9 +3784,9 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
             timeout: 180000 // 3 minutes
           });
         }
-        console.log('[MCP Server] ✅ Dependencies installed successfully');
+        console.log('[MCP Server] âœ… Dependencies installed successfully');
       } catch (installError: any) {
-        console.warn('[MCP Server] ⚠️ npm install failed, continuing anyway:', installError.message);
+        console.warn('[MCP Server] âš ï¸ npm install failed, continuing anyway:', installError.message);
         // Don't fail the fix attempt if npm install fails - agent might be able to fix it
       }
       
@@ -3803,29 +3846,29 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         }
       }
       
-      console.log(`[MCP Server] ✅ Cursor-agent fix attempt completed`);
+      console.log(`[MCP Server] âœ… Cursor-agent fix attempt completed`);
       
       // Wait for file system to stabilize
       await this.waitForFileSystemStability(actualProjectPath, 15000);
       
       // Validate again
-      console.log(`[MCP Server] 🔍 Re-validating build after fix attempt...`);
+      console.log(`[MCP Server] ðŸ” Re-validating build after fix attempt...`);
       const validationResult = await this.validateBuildAndDev(actualProjectPath);
       
       if (validationResult.success) {
-        console.log(`[MCP Server] ✅ Build errors fixed successfully!`);
+        console.log(`[MCP Server] âœ… Build errors fixed successfully!`);
         return {
           success: true,
           message: `Build errors fixed after ${retryCount + 1} attempt(s)`
         };
       } else {
-        console.log(`[MCP Server] ⚠️ Build still has errors after fix attempt`);
+        console.log(`[MCP Server] âš ï¸ Build still has errors after fix attempt`);
         
         // Retry with incremented count
         return await this.autoFixBuildErrors(actualProjectPath, validationResult, retryCount + 1, model, provider, cursorApiKey);
       }
     } catch (error: any) {
-      console.error(`[MCP Server] ❌ Auto-fix attempt ${retryCount + 1} failed:`, error.message);
+      console.error(`[MCP Server] âŒ Auto-fix attempt ${retryCount + 1} failed:`, error.message);
       
       // Retry
       return await this.autoFixBuildErrors(projectPath, errorDetails, retryCount + 1, model, provider, cursorApiKey);
@@ -3940,7 +3983,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const timeoutHandle = setTimeout(() => {
         timedOut = true;
         const msg = 'Cursor-agent timed out, terminating process...';
-        console.log(`[MCP Server] ⚠ ${msg}`);
+        console.log(`[MCP Server] âš  ${msg}`);
         addLog('warning', msg);
         
         // Capture partial work before terminating
@@ -3963,7 +4006,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         stdout += text;
         stdoutBuffer += text;
         
-        // ⚠️ DETECT DEV SERVER ATTEMPTS - Only match actual command executions
+        // âš ï¸ DETECT DEV SERVER ATTEMPTS - Only match actual command executions
         // Match JSON command fields like: "command": "npm run dev"
         // Avoid false positives from file contents, comments, or arbitrary text
         const devServerPatterns = [
@@ -3976,8 +4019,8 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         
         if (isDevServerCommand) {
           const alertMsg = 'ALERT: cursor-agent is trying to run a dev server!';
-          console.error(`⚠️⚠️⚠️ [MCP Server] ${alertMsg}`);
-          console.error('⚠️⚠️⚠️ [MCP Server] This will cause a 5-minute timeout. Killing in 10 seconds if not stopped...');
+          console.error(`âš ï¸âš ï¸âš ï¸ [MCP Server] ${alertMsg}`);
+          console.error('âš ï¸âš ï¸âš ï¸ [MCP Server] This will cause a 5-minute timeout. Killing in 10 seconds if not stopped...');
           addLog('error', alertMsg);
           addLog('warning', 'Will kill cursor-agent in 10 seconds to prevent hang');
           
@@ -3985,7 +4028,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           setTimeout(() => {
             if (!childProcess.killed) {
               const killMsg = 'Force-killing cursor-agent to prevent dev server hang!';
-              console.error(`⚠️⚠️⚠️ [MCP Server] ${killMsg}`);
+              console.error(`âš ï¸âš ï¸âš ï¸ [MCP Server] ${killMsg}`);
               addLog('error', killMsg);
               childProcess.kill('SIGKILL');
             }
@@ -4101,7 +4144,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         
         if (timedOut) {
           const msg = 'Cursor-agent timed out but may have completed work';
-          console.log(`[MCP Server] ⚠ ${msg}`);
+          console.log(`[MCP Server] âš  ${msg}`);
           addLog('warning', msg, { elapsed, exitCode: code, signal });
           resolve({ stdout, stderr, logs });
         } else if (code !== 0 && code !== null) {
@@ -4111,7 +4154,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           resolve({ stdout, stderr, logs });
         } else {
           const msg = 'Cursor-agent completed successfully';
-          console.log(`[MCP Server] ✓ ${msg}`);
+          console.log(`[MCP Server] âœ“ ${msg}`);
           addLog('success', msg, { elapsed, exitCode: code, totalLogs: logs.length });
           resolve({ stdout, stderr, logs });
         }
@@ -4121,7 +4164,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       childProcess.on('error', (error) => {
         clearTimeout(timeoutHandle);
         const errMsg = `Cursor-agent process error: ${error.message}`;
-        console.error(`[MCP Server] ❌ ${errMsg}`);
+        console.error(`[MCP Server] âŒ ${errMsg}`);
         addLog('error', errMsg, { error: error.message });
         reject(error);
       });
@@ -4210,7 +4253,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const timeoutHandle = setTimeout(() => {
         timedOut = true;
         const msg = 'Claude Code timed out, terminating process...';
-        console.log(`[MCP Server] ⚠ ${msg}`);
+        console.log(`[MCP Server] âš  ${msg}`);
         addLog('warning', msg);
         childProcess.kill('SIGTERM');
         setTimeout(() => {
@@ -4370,13 +4413,13 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     corruptedFiles: string[];
   }> {
     try {
-      console.log('[MCP Server] 🔍 Capturing partial work from timeout...');
+                console.log('[MCP Server] ðŸ” Capturing partial work from timeout...');
       
       // Get all files that were changed during the operation
       const filesChanged = await this.getChangedFiles(projectPath);
       
       if (filesChanged.length === 0) {
-        console.log('[MCP Server] ℹ️ No files were modified before timeout');
+        console.log('[MCP Server] â„¹ï¸ No files were modified before timeout');
         return {
           hasPartialWork: false,
           filesChanged: [],
@@ -4385,7 +4428,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         };
       }
       
-      console.log(`[MCP Server] 📊 Found ${filesChanged.length} files modified before timeout`);
+      console.log(`[MCP Server] ðŸ“Š Found ${filesChanged.length} files modified before timeout`);
       
       // Validate that files are in usable state (not corrupted)
       const validFiles: string[] = [];
@@ -4404,21 +4447,21 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
             // Basic validation - check for common corruption patterns
             if (this.isFileCorrupted(content, filePath)) {
               corruptedFiles.push(filePath);
-              console.warn(`[MCP Server] ⚠️ File appears corrupted: ${filePath}`);
+              console.warn(`[MCP Server] âš ï¸ File appears corrupted: ${filePath}`);
             } else {
               validFiles.push(filePath);
-              console.log(`[MCP Server] ✅ Valid file: ${filePath}`);
+              console.log(`[MCP Server] âœ… Valid file: ${filePath}`);
             }
           }
         } catch (error) {
-          console.warn(`[MCP Server] ⚠️ Error validating file ${filePath}:`, error);
+          console.warn(`[MCP Server] âš ï¸ Error validating file ${filePath}:`, error);
           corruptedFiles.push(filePath);
         }
       }
       
       const hasPartialWork = validFiles.length > 0;
       
-      console.log(`[MCP Server] 📊 Partial work analysis:`);
+      console.log(`[MCP Server] ðŸ“Š Partial work analysis:`);
       console.log(`[MCP Server]   - Total files changed: ${filesChanged.length}`);
       console.log(`[MCP Server]   - Valid files: ${validFiles.length}`);
       console.log(`[MCP Server]   - Corrupted files: ${corruptedFiles.length}`);
@@ -4431,7 +4474,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         corruptedFiles
       };
     } catch (error) {
-      console.error('[MCP Server] ❌ Error capturing partial work:', error);
+      console.error('[MCP Server] âŒ Error capturing partial work:', error);
       return {
         hasPartialWork: false,
         filesChanged: [],
@@ -4671,11 +4714,11 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     // Wrap git status in mutex to prevent concurrent git operations
     return await this.withGitMutex(async () => {
       try {
-        console.log(`[MCP Server] 🔍 Checking git status in: ${projectPath}`);
+        console.log(`[MCP Server] ðŸ” Checking git status in: ${projectPath}`);
         const { stdout } = await execAsync('git status --porcelain', { cwd: projectPath });
         
         if (!stdout.trim()) {
-          console.log('[MCP Server] ℹ️ No changes detected by git');
+          console.log('[MCP Server] â„¹ï¸ No changes detected by git');
           return [];
         }
         
@@ -4686,10 +4729,10 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           return filepath;
         });
         
-        console.log(`[MCP Server] ✅ Found ${files.length} changed file(s)`);
+        console.log(`[MCP Server] âœ… Found ${files.length} changed file(s)`);
         return files;
       } catch (error) {
-        console.error('[MCP Server] ❌ Failed to get changed files:', error);
+        console.error('[MCP Server] âŒ Failed to get changed files:', error);
         return [];
       }
     });
@@ -4709,12 +4752,12 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const files = await this.getChangedFiles(projectPath);
       const currentChangeCount = files.length;
       
-      console.log(`[MCP Server] 🔍 File system check: ${currentChangeCount} changed files`);
+      console.log(`[MCP Server] ðŸ” File system check: ${currentChangeCount} changed files`);
       
       if (currentChangeCount === previousChangeCount && currentChangeCount > 0) {
         stableCount++;
         if (stableCount >= requiredStableChecks) {
-          console.log(`[MCP Server] ✅ File system stable with ${currentChangeCount} changes`);
+          console.log(`[MCP Server] âœ… File system stable with ${currentChangeCount} changes`);
           return;
         }
       } else {
@@ -4725,7 +4768,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       await new Promise(resolve => setTimeout(resolve, pollInterval));
     }
     
-    console.log(`[MCP Server] ⚠️ File system stability timeout after ${maxWaitMs}ms`);
+    console.log(`[MCP Server] âš ï¸ File system stability timeout after ${maxWaitMs}ms`);
   }
 
   private categorizeFiles(files: string[]): Record<string, string[]> {
@@ -4868,7 +4911,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           repo: sanitizedRepoName
         });
         
-        console.log('[MCP Server] 📦 Repository already exists:', existingRepo.html_url);
+        console.log('[MCP Server] ðŸ“¦ Repository already exists:', existingRepo.html_url);
         return {
           success: true,
           repoUrl: existingRepo.clone_url,
@@ -4877,7 +4920,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       } catch (notFoundError: any) {
         // Repository doesn't exist, create it
         if (notFoundError.status === 404) {
-          console.log('[MCP Server] 🆕 Creating new GitHub repository:', sanitizedRepoName);
+          console.log('[MCP Server] ðŸ†• Creating new GitHub repository:', sanitizedRepoName);
           
           const { data: user } = await octokit.users.getAuthenticated();
           const { data: newRepo } = await octokit.repos.createForAuthenticatedUser({
@@ -4887,7 +4930,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
             description: `Created by ScopesFlow MCP Server`
           });
           
-          console.log('[MCP Server] ✅ Repository created:', newRepo.html_url);
+          console.log('[MCP Server] âœ… Repository created:', newRepo.html_url);
           return {
             success: true,
             repoUrl: newRepo.clone_url,
@@ -4897,7 +4940,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         throw notFoundError;
       }
     } catch (error: any) {
-      console.error('[MCP Server] ❌ Failed to create GitHub repository:', error.message);
+      console.error('[MCP Server] âŒ Failed to create GitHub repository:', error.message);
       return {
         success: false,
         message: `Failed to create repository: ${error.message}`
@@ -4912,9 +4955,9 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     try {
       const configPath = path.join(projectPath, '.git-config.json');
       await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
-      console.log('[MCP Server] ✅ Git configuration saved');
+      console.log('[MCP Server] âœ… Git configuration saved');
     } catch (error) {
-      console.error('[MCP Server] ❌ Failed to save git configuration:', error);
+      console.error('[MCP Server] âŒ Failed to save git configuration:', error);
     }
   }
 
@@ -4926,7 +4969,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const configPath = path.join(projectPath, '.git-config.json');
       const configData = await fs.readFile(configPath, 'utf-8');
       const config = JSON.parse(configData) as ProjectGitConfig;
-      console.log('[MCP Server] ✅ Git configuration loaded');
+      console.log('[MCP Server] âœ… Git configuration loaded');
       return config;
     } catch (error) {
       // File doesn't exist or is invalid - this is normal for new projects
@@ -4941,17 +4984,17 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
   private async syncWithRemote(projectPath: string, branchName: string, isInitialPush: boolean = false): Promise<void> {
     // Skip pull for initial push to empty repository
     if (isInitialPush) {
-      console.log('[MCP Server] ℹ️ Initial push to empty repository - skipping sync');
+      console.log('[MCP Server] â„¹ï¸ Initial push to empty repository - skipping sync');
       return;
     }
     
     try {
-      console.log('[MCP Server] 🔄 Syncing with remote repository...');
+                console.log('[MCP Server] ðŸ”„ Syncing with remote repository...');
       
       // Fetch remote state
       try {
         await execAsync('git fetch origin', { cwd: projectPath, timeout: 30000 });
-        console.log('[MCP Server] ✅ Fetched remote state');
+        console.log('[MCP Server] âœ… Fetched remote state');
       } catch (fetchError) {
         // If this is a new remote (no commits yet), fetch will fail - that's OK
         console.log('[MCP Server] Could not fetch remote (possibly new repository)');
@@ -4985,12 +5028,12 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           `git pull --rebase origin ${branchName} --allow-unrelated-histories`,
           { cwd: projectPath, timeout: 60000 }
         );
-        console.log('[MCP Server] ✅ Successfully synced with remote (rebase)');
+        console.log('[MCP Server] âœ… Successfully synced with remote (rebase)');
       } catch (rebaseError: any) {
         // Check if the error is because we're already up to date
         const errorStr = rebaseError.message || rebaseError.toString();
         if (errorStr.includes('Already up to date') || errorStr.includes('Current branch') && errorStr.includes('up to date')) {
-          console.log('[MCP Server] ✅ Local is already up to date with remote');
+          console.log('[MCP Server] âœ… Local is already up to date with remote');
           return;
         }
         
@@ -5001,21 +5044,21 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
             `git pull origin ${branchName} --allow-unrelated-histories`,
             { cwd: projectPath, timeout: 60000 }
           );
-          console.log('[MCP Server] ✅ Successfully synced with remote (merge)');
+          console.log('[MCP Server] âœ… Successfully synced with remote (merge)');
         } catch (mergeError: any) {
           const mergeErrorStr = mergeError.message || mergeError.toString();
           if (mergeErrorStr.includes('Already up to date')) {
-            console.log('[MCP Server] ✅ Local is already up to date with remote');
+            console.log('[MCP Server] âœ… Local is already up to date with remote');
             return;
           }
           
           // If both rebase and merge fail, log but don't throw
-          console.warn('[MCP Server] ⚠️ Could not pull remote changes:', mergeError);
+          console.warn('[MCP Server] âš ï¸ Could not pull remote changes:', mergeError);
         }
       }
     } catch (error) {
       // Log but don't throw - we want to attempt the push anyway
-      console.warn('[MCP Server] ⚠️ Error during sync with remote:', error);
+      console.warn('[MCP Server] âš ï¸ Error during sync with remote:', error);
     }
   }
 
@@ -5033,7 +5076,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         return true; // No lock file, all good
       }
       
-      console.log('[MCP Server] ⚠️ Found stale .git/index.lock file');
+      console.log('[MCP Server] âš ï¸ Found stale .git/index.lock file');
       
       // Wait a moment to ensure any git process has finished
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -5042,13 +5085,13 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const gitRunning = await this.isGitProcessRunning(projectPath);
       
       if (gitRunning) {
-        console.log('[MCP Server] ⚠️ Git processes still running, waiting...');
+        console.log('[MCP Server] âš ï¸ Git processes still running, waiting...');
         await new Promise(resolve => setTimeout(resolve, 3000));
         
         // Check again
         const stillRunning = await this.isGitProcessRunning(projectPath);
         if (stillRunning) {
-          console.log('[MCP Server] ❌ Cannot remove lock file - git processes still active');
+          console.log('[MCP Server] âŒ Cannot remove lock file - git processes still active');
           return false;
         }
       }
@@ -5058,18 +5101,18 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         // Double-check file still exists before attempting deletion
         await fs.access(lockFile);
         await fs.unlink(lockFile);
-        console.log('[MCP Server] ✅ Removed stale .git/index.lock file');
+        console.log('[MCP Server] âœ… Removed stale .git/index.lock file');
         return true;
       } catch (unlinkError: any) {
         // ENOENT means file was already deleted by another process - this is success
         if (unlinkError.code === 'ENOENT') {
-          console.log('[MCP Server] ✅ Lock file already removed by another process');
+          console.log('[MCP Server] âœ… Lock file already removed by another process');
           return true;
         }
         throw unlinkError; // Re-throw other errors
       }
     } catch (error) {
-      console.error('[MCP Server] ❌ Failed to clean git lock files:', error);
+      console.error('[MCP Server] âŒ Failed to clean git lock files:', error);
       return false;
     }
   }
@@ -5085,16 +5128,16 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     isInitialCommit: boolean = false
   ): Promise<{ success: boolean; message: string; changesCount?: number }> {
     try {
-      console.log('[MCP Server] 🔍 Starting git commit and push process...');
+                console.log('[MCP Server] ðŸ” Starting git commit and push process...');
       
       // If gitRepository not provided as parameter, try to load from config
       if (!gitRepository) {
         const config = await this.loadProjectGitConfig(projectPath);
         if (config?.gitRepository) {
           gitRepository = config.gitRepository;
-          console.log('[MCP Server] 📋 Loaded git repository from config:', gitRepository);
+          console.log('[MCP Server] ðŸ“‹ Loaded git repository from config:', gitRepository);
         } else {
-          console.warn('[MCP Server] ⚠️ No git repository configured - push will be skipped');
+          console.warn('[MCP Server] âš ï¸ No git repository configured - push will be skipped');
         }
       }
       
@@ -5110,26 +5153,26 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         console.log('[MCP Server] Configuring git user...');
         await execAsync(`git config user.name "${gitUserName}"`, { cwd: projectPath });
         await execAsync(`git config user.email "${gitUserEmail}"`, { cwd: projectPath });
-        console.log('[MCP Server] ✅ Git user configured');
+        console.log('[MCP Server] âœ… Git user configured');
       }
       
       // Clean any stale lock files FIRST before any git operations
-      console.log('[MCP Server] 🔧 Cleaning any existing lock files...');
+      console.log('[MCP Server] ðŸ”§ Cleaning any existing lock files...');
       const lockCleaned = await this.cleanGitLockFiles(projectPath);
       if (!lockCleaned) {
-        console.warn('[MCP Server] ⚠️ Could not clean git lock files, but proceeding anyway');
+        console.warn('[MCP Server] âš ï¸ Could not clean git lock files, but proceeding anyway');
       }
 
       // Add delay to ensure all previous git operations are complete
-      console.log('[MCP Server] ⏳ Waiting for git operations to settle...');
+      console.log('[MCP Server] â³ Waiting for git operations to settle...');
       await new Promise(resolve => setTimeout(resolve, 5000)); // Increased to 5 second delay
-      console.log('[MCP Server] ✅ Ready to commit');
+      console.log('[MCP Server] âœ… Ready to commit');
 
       // Verify no lock files exist before proceeding
       const lockFile = path.join(projectPath, '.git', 'index.lock');
       const lockExists = await fs.access(lockFile).then(() => true).catch(() => false);
       if (lockExists) {
-        console.log('[MCP Server] ⚠️ Lock file still exists, attempting final cleanup...');
+        console.log('[MCP Server] âš ï¸ Lock file still exists, attempting final cleanup...');
         await this.cleanGitLockFiles(projectPath);
       }
 
@@ -5140,29 +5183,29 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: projectPath });
         
         if (!statusOutput.trim()) {
-          console.log('[MCP Server] ℹ️ No changes to commit - skipping commit process');
+          console.log('[MCP Server] â„¹ï¸ No changes to commit - skipping commit process');
           return { success: true, message: 'No changes to commit', changesCount: 0 };
         }
 
         // Count changes for logging
         const changesCount = statusOutput.trim().split('\n').length;
-        console.log(`[MCP Server] 📝 Found ${changesCount} file(s) with changes`);
+        console.log(`[MCP Server] ðŸ“ Found ${changesCount} file(s) with changes`);
         
         // Stage all changes
         console.log('[MCP Server] Staging changes...');
         await execAsync('git add .', { cwd: projectPath });
-        console.log('[MCP Server] ✅ Changes staged');
+        console.log('[MCP Server] âœ… Changes staged');
         
         // Commit changes - truncate message to 20 characters to prevent Windows command line length errors
         const truncatedMessage = commitMessage.substring(0, 20);
         const escapedMessage = truncatedMessage.replace(/"/g, '\\"');
         console.log('[MCP Server] Creating commit...');
         await execAsync(`git commit -m "${escapedMessage}"`, { cwd: projectPath });
-        console.log('[MCP Server] ✅ Commit created');
+        console.log('[MCP Server] âœ… Commit created');
         
         // Only attempt to push if remote exists
         if (!gitStatus.hasRemote) {
-          console.log('[MCP Server] ⚠️ No remote repository configured - skipping push');
+          console.log('[MCP Server] âš ï¸ No remote repository configured - skipping push');
           return { 
             success: true, 
             message: 'Commit created successfully, but no remote repository configured for push', 
@@ -5187,7 +5230,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           }
           
           await execAsync(`git remote set-url origin "${authenticatedUrl}"`, { cwd: projectPath });
-          console.log('[MCP Server] ✅ Remote URL authenticated');
+          console.log('[MCP Server] âœ… Remote URL authenticated');
         }
         
         // Detect current branch name
@@ -5218,7 +5261,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
               console.log('[MCP Server] Pushing to remote repository (main)...');
               await execAsync('git push -u origin main', { cwd: projectPath });
               
-              console.log('[MCP Server] ✅ Successfully committed and pushed changes');
+              console.log('[MCP Server] âœ… Successfully committed and pushed changes');
               return { 
                 success: true, 
                 message: 'Successfully committed and pushed changes', 
@@ -5237,7 +5280,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         console.log(`[MCP Server] Pushing to remote repository (${branchName})...`);
         await execAsync(`git push -u origin ${branchName}`, { cwd: projectPath });
         
-        console.log('[MCP Server] ✅ Successfully committed and pushed changes');
+        console.log('[MCP Server] âœ… Successfully committed and pushed changes');
         return { 
           success: true, 
           message: 'Successfully committed and pushed changes', 
@@ -5245,7 +5288,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         };
       });
     } catch (error) {
-      console.error('[MCP Server] ❌ Git operation failed:', error);
+      console.error('[MCP Server] âŒ Git operation failed:', error);
       
       const errorMessage = error instanceof Error ? error.message : String(error);
       
@@ -5255,7 +5298,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
                                    errorMessage.includes('.git-config.json');
       
       if (isSecretScanningError && retryCount === 0) {
-        console.log('[MCP Server] 🔒 GitHub detected secrets in commit - attempting cleanup...');
+        console.log('[MCP Server] ðŸ”’ GitHub detected secrets in commit - attempting cleanup...');
         
         try {
           // Ensure .gitignore has the sensitive files
@@ -5268,10 +5311,10 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           // Amend the commit to remove these files
           await execAsync('git commit --amend --no-edit', { cwd: projectPath }).catch(() => {});
           
-          console.log('[MCP Server] 🔄 Retrying push after removing secrets...');
+          console.log('[MCP Server] ðŸ”„ Retrying push after removing secrets...');
           return await this.commitAndPush(projectPath, commitMessage, gitHubToken, gitUserName, gitUserEmail, gitRepository, retryCount + 1, isInitialCommit);
         } catch (cleanupError) {
-          console.error('[MCP Server] ❌ Failed to cleanup secrets:', cleanupError);
+          console.error('[MCP Server] âŒ Failed to cleanup secrets:', cleanupError);
           return { 
             success: false, 
             message: 'Push blocked by GitHub: Repository contains secrets. Please manually remove .git-config.json from git history and add it to .gitignore.' 
@@ -5286,7 +5329,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
                        errorMessage.includes('Updates were rejected');
       
       if (needsPull && retryCount === 0) {
-        console.log('[MCP Server] 🔄 Remote has changes, pulling before push...');
+        console.log('[MCP Server] ðŸ”„ Remote has changes, pulling before push...');
         
         try {
           // Detect current branch
@@ -5296,18 +5339,18 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           // Try pull with rebase and allow unrelated histories
           try {
             await execAsync(`git pull --rebase origin ${branch} --allow-unrelated-histories`, { cwd: projectPath });
-            console.log('[MCP Server] ✅ Successfully pulled with rebase');
+            console.log('[MCP Server] âœ… Successfully pulled with rebase');
           } catch (rebaseError) {
             // If rebase fails, try regular merge
             console.log('[MCP Server] Rebase failed, trying merge...');
             await execAsync(`git pull origin ${branch} --allow-unrelated-histories`, { cwd: projectPath });
-            console.log('[MCP Server] ✅ Successfully pulled with merge');
+            console.log('[MCP Server] âœ… Successfully pulled with merge');
           }
           
-          console.log('[MCP Server] 🔄 Retrying push after sync...');
+          console.log('[MCP Server] ðŸ”„ Retrying push after sync...');
           return await this.commitAndPush(projectPath, commitMessage, gitHubToken, gitUserName, gitUserEmail, gitRepository, retryCount + 1, false); // Not initial commit anymore after sync
         } catch (pullError) {
-          console.error('[MCP Server] ❌ Failed to pull remote changes:', pullError);
+          console.error('[MCP Server] âŒ Failed to pull remote changes:', pullError);
           return { 
             success: false, 
             message: `Failed to sync with remote: ${pullError instanceof Error ? pullError.message : 'Unknown error'}` 
@@ -5333,11 +5376,11 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       const maxRetries = 3;
       if (retryCount < maxRetries && isTransientError) {
         const delayMs = Math.pow(2, retryCount + 1) * 1000; // 2s, 4s, 8s
-        console.warn(`[MCP Server] ⚠️ Transient error detected, retrying in ${delayMs/1000}s... (attempt ${retryCount + 1}/${maxRetries})`);
+        console.warn(`[MCP Server] âš ï¸ Transient error detected, retrying in ${delayMs/1000}s... (attempt ${retryCount + 1}/${maxRetries})`);
         
         // If lock file error, try to clean it
         if (isLockFileError) {
-          console.log('[MCP Server] 🔧 Attempting to clean lock files...');
+          console.log('[MCP Server] ðŸ”§ Attempting to clean lock files...');
           await this.cleanGitLockFiles(projectPath);
         }
         
@@ -5347,7 +5390,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         const finalError = isTransientError ? 
           `Commit/push failed after ${maxRetries} retries: ${errorMessage}` : 
           `Commit/push failed: ${errorMessage}`;
-        console.error(`[MCP Server] ❌ ${finalError}`);
+        console.error(`[MCP Server] âŒ ${finalError}`);
         return { success: false, message: finalError };
       }
     }
@@ -5375,7 +5418,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       if (!gitExists) {
         console.log('[MCP Server] Git repository not found, initializing...');
         await execAsync('git init', { cwd: projectPath });
-        console.log('[MCP Server] ✅ Git repository initialized');
+        console.log('[MCP Server] âœ… Git repository initialized');
       } else {
         console.log('[MCP Server] Git repository already exists');
       }
@@ -5400,7 +5443,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           await execAsync(`git remote add origin ${gitRepository}`, { cwd: projectPath });
           hasRemote = true;
           remoteUrl = gitRepository;
-          console.log('[MCP Server] ✅ Remote origin added:', gitRepository);
+          console.log('[MCP Server] âœ… Remote origin added:', gitRepository);
         }
       }
 
@@ -5410,7 +5453,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         remoteUrl
       };
     } catch (error) {
-      console.error('[MCP Server] ❌ Failed to ensure git repository:', error);
+      console.error('[MCP Server] âŒ Failed to ensure git repository:', error);
       throw new Error(`Git repository initialization failed: ${error}`);
     }
   }
@@ -5449,10 +5492,10 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       // Write back if modified
       if (modified) {
         await fs.writeFile(gitignorePath, lines.join('\n'), 'utf-8');
-        console.log('[MCP Server] ✅ .gitignore updated');
+        console.log('[MCP Server] âœ… .gitignore updated');
       }
     } catch (error) {
-      console.error('[MCP Server] ⚠️ Failed to update .gitignore:', error);
+      console.error('[MCP Server] âš ï¸ Failed to update .gitignore:', error);
       // Don't throw - this is not critical enough to stop the process
     }
   }
@@ -5512,7 +5555,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
 
   // TAILWIND V3 VALIDATION METHODS
   private async validateAndFixTailwindV3(projectPath: string): Promise<void> {
-    console.log('[MCP Server] 🔍 Validating Tailwind v3 setup...');
+    console.log('[MCP Server] ðŸ” Validating Tailwind v3 setup...');
     
     try {
       // 1. Check package.json
@@ -5528,9 +5571,9 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       // 4. Validate vite.config.ts
       await this.validateViteConfigV3(projectPath);
       
-      console.log('[MCP Server] ✅ Tailwind v3 validation complete');
+      console.log('[MCP Server] âœ… Tailwind v3 validation complete');
     } catch (error) {
-      console.error('[MCP Server] ❌ Tailwind v3 validation failed:', error);
+      console.error('[MCP Server] âŒ Tailwind v3 validation failed:', error);
       throw error;
     }
   }
@@ -5545,10 +5588,10 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     const hasAutoprefixer = packageJson.devDependencies?.['autoprefixer'];
     
     if (!hasTailwindV3 || !hasPostCSS || !hasAutoprefixer) {
-      console.log('[MCP Server] ⚠️ Fixing Tailwind v3 dependencies...');
+      console.log('[MCP Server] âš ï¸ Fixing Tailwind v3 dependencies...');
       await this.fixTailwindV3Dependencies(projectPath);
     } else {
-      console.log('[MCP Server] ✅ Tailwind v3 dependencies validated');
+      console.log('[MCP Server] âœ… Tailwind v3 dependencies validated');
     }
   }
 
@@ -5574,7 +5617,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     
     // Run npm install
     await execAsync('npm install', { cwd: projectPath });
-    console.log('[MCP Server] ✅ Tailwind v3 dependencies installed');
+    console.log('[MCP Server] âœ… Tailwind v3 dependencies installed');
   }
 
   private async validateTailwindConfig(projectPath: string): Promise<void> {
@@ -5582,9 +5625,9 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     
     try {
       await fs.access(configPath);
-      console.log('[MCP Server] ✅ tailwind.config.js exists');
+      console.log('[MCP Server] âœ… tailwind.config.js exists');
     } catch {
-      console.log('[MCP Server] ⚠️ Creating tailwind.config.js...');
+      console.log('[MCP Server] âš ï¸ Creating tailwind.config.js...');
       await this.createTailwindConfig(projectPath);
     }
   }
@@ -5637,7 +5680,7 @@ export default {
 }`;
     
     await fs.writeFile(configPath, configContent);
-    console.log('[MCP Server] ✅ tailwind.config.js created');
+    console.log('[MCP Server] âœ… tailwind.config.js created');
   }
 
   private async validatePostCSSConfig(projectPath: string): Promise<void> {
@@ -5645,9 +5688,9 @@ export default {
     
     try {
       await fs.access(configPath);
-      console.log('[MCP Server] ✅ postcss.config.js exists');
+      console.log('[MCP Server] âœ… postcss.config.js exists');
     } catch {
-      console.log('[MCP Server] ⚠️ Creating postcss.config.js...');
+      console.log('[MCP Server] âš ï¸ Creating postcss.config.js...');
       await this.createPostCSSConfig(projectPath);
     }
   }
@@ -5662,7 +5705,7 @@ export default {
 }`;
     
     await fs.writeFile(configPath, configContent);
-    console.log('[MCP Server] ✅ postcss.config.js created');
+    console.log('[MCP Server] âœ… postcss.config.js created');
   }
 
   private async validateAndFixV3CSS(projectPath: string): Promise<void> {
@@ -5671,7 +5714,7 @@ export default {
     
     // Check for v4 syntax and convert to v3
     if (cssContent.includes('@import "tailwindcss"') || cssContent.includes('@theme')) {
-      console.log('[MCP Server] ⚠️ Converting CSS from v4 to v3 syntax...');
+      console.log('[MCP Server] âš ï¸ Converting CSS from v4 to v3 syntax...');
       
       // Replace v4 syntax with v3 syntax
       cssContent = cssContent
@@ -5712,7 +5755,7 @@ export default {
     
     // Validate v3 structure
     this.validateV3CSSStructure(cssContent);
-    console.log('[MCP Server] ✅ CSS v3 structure validated');
+    console.log('[MCP Server] âœ… CSS v3 structure validated');
   }
 
   private validateV3CSSStructure(cssContent: string): void {
@@ -5743,7 +5786,7 @@ export default {
     
     // Remove v4 PostCSS configuration
     if (viteConfig.includes('@tailwindcss/postcss')) {
-      console.log('[MCP Server] ⚠️ Removing v4 PostCSS config from vite.config.ts...');
+      console.log('[MCP Server] âš ï¸ Removing v4 PostCSS config from vite.config.ts...');
       
       // Remove the import
       viteConfig = viteConfig.replace(
@@ -5760,12 +5803,12 @@ export default {
       await fs.writeFile(viteConfigPath, viteConfig);
     }
     
-    console.log('[MCP Server] ✅ Vite config v3 validated');
+    console.log('[MCP Server] âœ… Vite config v3 validated');
   }
 
   // NATIVEWIND SETUP FOR EXPO PROJECTS
   private async setupNativeWindForExpo(projectPath: string): Promise<void> {
-    console.log('[MCP Server] 🔍 Setting up NativeWind for Expo project...');
+    console.log('[MCP Server] ðŸ” Setting up NativeWind for Expo project...');
     
     try {
       // 1. Install NativeWind dependencies
@@ -5786,15 +5829,15 @@ export default {
       // 6. Update app.json if it exists
       await this.updateAppJsonForNativeWind(projectPath);
       
-      console.log('[MCP Server] ✅ NativeWind setup complete');
+      console.log('[MCP Server] âœ… NativeWind setup complete');
     } catch (error) {
-      console.error('[MCP Server] ❌ NativeWind setup failed:', error);
+      console.error('[MCP Server] âŒ NativeWind setup failed:', error);
       throw error;
     }
   }
 
   private async installNativeWindDependencies(projectPath: string): Promise<void> {
-    console.log('[MCP Server] 📦 Installing NativeWind dependencies...');
+    console.log('[MCP Server] ðŸ“¦ Installing NativeWind dependencies...');
     
     try {
       const packageJsonPath = path.join(projectPath, 'package.json');
@@ -5815,9 +5858,9 @@ export default {
       packageJson.devDependencies['autoprefixer'] = '^10.4.17';
       
       await fs.writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2), 'utf-8');
-      console.log('[MCP Server] ✅ NativeWind dependencies added to package.json');
+      console.log('[MCP Server] âœ… NativeWind dependencies added to package.json');
     } catch (error) {
-      console.error('[MCP Server] ⚠️ Failed to update package.json:', error);
+      console.error('[MCP Server] âš ï¸ Failed to update package.json:', error);
       throw error;
     }
   }
@@ -5841,7 +5884,7 @@ module.exports = {
 }`;
     
     await fs.writeFile(tailwindConfigPath, tailwindConfig, 'utf-8');
-    console.log('[MCP Server] ✅ Created tailwind.config.js for NativeWind');
+    console.log('[MCP Server] âœ… Created tailwind.config.js for NativeWind');
   }
 
   private async createNativeWindPostCSSConfig(projectPath: string): Promise<void> {
@@ -5855,7 +5898,7 @@ module.exports = {
 }`;
     
     await fs.writeFile(postcssConfigPath, postcssConfig, 'utf-8');
-    console.log('[MCP Server] ✅ Created postcss.config.js for NativeWind');
+    console.log('[MCP Server] âœ… Created postcss.config.js for NativeWind');
   }
 
   private async updateBabelConfigForNativeWind(projectPath: string): Promise<void> {
@@ -5866,7 +5909,7 @@ module.exports = {
       
       // Check if NativeWind plugin is already present
       if (babelConfig.includes('nativewind/babel')) {
-        console.log('[MCP Server] ✅ NativeWind plugin already in babel.config.js');
+        console.log('[MCP Server] âœ… NativeWind plugin already in babel.config.js');
         return;
       }
       
@@ -5895,9 +5938,9 @@ module.exports = {
       }
       
       await fs.writeFile(babelConfigPath, babelConfig, 'utf-8');
-      console.log('[MCP Server] ✅ Updated babel.config.js with NativeWind plugin');
+      console.log('[MCP Server] âœ… Updated babel.config.js with NativeWind plugin');
     } catch (error) {
-      console.warn('[MCP Server] ⚠️ Failed to update babel.config.js:', error);
+      console.warn('[MCP Server] âš ï¸ Failed to update babel.config.js:', error);
       // Create a new babel.config.js if it doesn't exist or is invalid
       const defaultBabelConfig = `module.exports = function(api) {
   api.cache(true);
@@ -5907,7 +5950,7 @@ module.exports = {
   };
 };`;
       await fs.writeFile(babelConfigPath, defaultBabelConfig, 'utf-8');
-      console.log('[MCP Server] ✅ Created new babel.config.js with NativeWind plugin');
+      console.log('[MCP Server] âœ… Created new babel.config.js with NativeWind plugin');
     }
   }
 
@@ -5917,7 +5960,7 @@ module.exports = {
     const typeDef = `/// <reference types="nativewind/types" />`;
     
     await fs.writeFile(typeDefPath, typeDef, 'utf-8');
-    console.log('[MCP Server] ✅ Created nativewind-env.d.ts for TypeScript support');
+    console.log('[MCP Server] âœ… Created nativewind-env.d.ts for TypeScript support');
   }
 
   private async updateAppJsonForNativeWind(projectPath: string): Promise<void> {
@@ -5935,10 +5978,10 @@ module.exports = {
       // But we can ensure the configuration is valid
       
       await fs.writeFile(appJsonPath, JSON.stringify(appJson, null, 2), 'utf-8');
-      console.log('[MCP Server] ✅ Verified app.json configuration');
+      console.log('[MCP Server] âœ… Verified app.json configuration');
     } catch (error) {
       // app.json might not exist or be in a different format - that's okay
-      console.log('[MCP Server] ℹ️ app.json not found or couldn\'t be updated (this is okay)');
+      console.log('[MCP Server] â„¹ï¸ app.json not found or couldn\'t be updated (this is okay)');
     }
   }
 
@@ -6066,7 +6109,7 @@ module.exports = {
       return this.runBuildWorker(buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey);
     }
 
-    // ──── Legacy in-process mode ────
+    // â”€â”€â”€â”€ Legacy in-process mode â”€â”€â”€â”€
     const createProjectFn = (config: unknown) => {
       const c = config as Record<string, unknown>;
       const args = {
@@ -6458,13 +6501,13 @@ module.exports = {
       // POST /api/execute-prompt
       if (req.method === 'POST' && (urlPath === '/api/execute-prompt' || urlPath === '/api/execute-prompt/')) {
         console.error('[MCP Server] POST /api/execute-prompt received');
-        console.log('[MCP Server] 🔍 DEBUG: HTTP request received - method=', req.method, 'urlPath=', urlPath, 'fullUrl=', url);
-        console.log('[MCP Server] 🔍 DEBUG: Request headers - user-agent=', req.headers['user-agent'], 'content-type=', req.headers['content-type']);
+        console.log('[MCP Server] ðŸ” DEBUG: HTTP request received - method=', req.method, 'urlPath=', urlPath, 'fullUrl=', url);
+        console.log('[MCP Server] ðŸ” DEBUG: Request headers - user-agent=', req.headers['user-agent'], 'content-type=', req.headers['content-type']);
         
         if (apiKey) {
           const headerKey = req.headers['x-api-key'];
           if (headerKey !== apiKey) {
-            console.warn('[MCP Server] ⚠️ DEBUG: API key mismatch');
+            console.warn('[MCP Server] âš ï¸ DEBUG: API key mismatch');
             res.writeHead(401, { 'Content-Type': 'application/json', ...cors });
             res.end(JSON.stringify({ error: 'Unauthorized' }));
             return;
@@ -6474,7 +6517,7 @@ module.exports = {
         req.on('data', (chunk) => { body += chunk; });
         req.on('end', () => {
           try {
-            console.log('[MCP Server] 🔍 DEBUG: Parsing request body, length=', body.length);
+                console.log('[MCP Server] ðŸ” DEBUG: Parsing request body, length=', body.length);
             const data = JSON.parse(body || '{}') as {
               buildId?: string; projectId?: string; promptId?: string; promptContent?: string; prompt?: string; projectPath?: string;
               timeout?: number; context?: string; supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
@@ -6484,11 +6527,11 @@ module.exports = {
             // Accept both field names: promptContent (build-phase callers) and prompt (build-worker)
             const promptContent = data.promptContent ?? data.prompt;
             
-            console.log('[MCP Server] 🔍 DEBUG: Parsed request - buildId=', buildId, 'projectId=', projectId, 'projectPath=', projectPath);
-            console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasPromptContent=', !!promptContent, 'promptLength=', promptContent?.length || 0);
-            console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasSupabaseUrl=', !!supabaseUrl, 'hasServiceRoleKey=', !!serviceRoleKey, 'hasAnonKey=', !!anonKey, 'hasAccessToken=', !!accessToken);
-            console.log('[MCP Server] 🔍 DEBUG: Parsed request - provider=', provider || 'cursor (default)');
-            console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasCursorApiKey=', !!cursorApiKey);
+            console.log('[MCP Server] ðŸ” DEBUG: Parsed request - buildId=', buildId, 'projectId=', projectId, 'projectPath=', projectPath);
+            console.log('[MCP Server] ðŸ” DEBUG: Parsed request - hasPromptContent=', !!promptContent, 'promptLength=', promptContent?.length || 0);
+            console.log('[MCP Server] ðŸ” DEBUG: Parsed request - hasSupabaseUrl=', !!supabaseUrl, 'hasServiceRoleKey=', !!serviceRoleKey, 'hasAnonKey=', !!anonKey, 'hasAccessToken=', !!accessToken);
+            console.log('[MCP Server] ðŸ” DEBUG: Parsed request - provider=', provider || 'cursor (default)');
+            console.log('[MCP Server] ðŸ” DEBUG: Parsed request - hasCursorApiKey=', !!cursorApiKey);
             const hasServiceRole = !!serviceRoleKey;
             const hasUserAuth = !!anonKey && !!accessToken;
             if (!buildId || !projectId || !promptContent || !projectPath || !supabaseUrl || (!hasServiceRole && !hasUserAuth)) {
@@ -6499,53 +6542,68 @@ module.exports = {
             res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
             res.end(JSON.stringify({ scheduled: true }));
             setImmediate(async () => {
-              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Starting async executePrompt');
-              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - buildId=', buildId);
-              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - projectPath=', projectPath);
-              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - hasServiceRole=', hasServiceRole);
+              console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - Starting async executePrompt');
+              console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - buildId=', buildId);
+              console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - projectPath=', projectPath);
+              console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - hasServiceRole=', hasServiceRole);
               
               const supabase: SupabaseClient = hasServiceRole
                 ? createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } })
                 : createClient(supabaseUrl, anonKey as string, { global: { headers: { Authorization: `Bearer ${accessToken}` } } });
               
+              let resolvedUserId: string | undefined;
+              if (accessToken) {
+                try {
+                  const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
+                  if (userError) {
+                    console.warn('[MCP Server] ⚠️ DEBUG: HTTP handler - getUser failed:', userError.message);
+                  } else if (user?.id) {
+                    resolvedUserId = user.id;
+                  }
+                } catch (userErr) {
+                  console.warn('[MCP Server] ⚠️ DEBUG: HTTP handler - getUser exception:', userErr instanceof Error ? userErr.message : String(userErr));
+                }
+              }
+              console.log('[MCP Server] 🔍 DEBUG: HTTP handler - resolvedUserId=', resolvedUserId || 'none');
+
               try {
-                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Calling executePrompt...');
+                console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - Calling executePrompt...');
                 const execRes = await this.executePrompt(this.validateExecutePromptArgs({
-                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: undefined, promptId, provider, model, cursorApiKey,
+                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: resolvedUserId, promptId, provider, model, cursorApiKey,
                 }));
                 
-                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - executePrompt returned, parsing result...');
+                console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - executePrompt returned, parsing result...');
                 const execData = this.parseMcpResult(execRes);
                 const success = !!execData.success;
                 const resultSize = JSON.stringify(execRes).length;
                 
-                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - execData.success=', success);
-                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - execData.error=', execData.error || 'none');
-                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - result size=', resultSize, 'bytes');
+                console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - execData.success=', success);
+                console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - execData.error=', execData.error || 'none');
+                console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - result size=', resultSize, 'bytes');
                 
                 // Try to refresh token before insert if using user auth
                 if (!hasServiceRole) {
                   try {
                     const { data: { session } } = await supabase.auth.getSession();
                     if (session && session.expires_at && session.expires_at * 1000 < Date.now() + 60000) {
-                      console.log('[MCP Server] 🔄 DEBUG: HTTP handler - Token expiring soon, refreshing before mcp_log insert...');
+                      console.log('[MCP Server] ðŸ”„ DEBUG: HTTP handler - Token expiring soon, refreshing before mcp_log insert...');
                       await supabase.auth.refreshSession();
-                      console.log('[MCP Server] ✅ DEBUG: HTTP handler - Token refreshed successfully');
+                      console.log('[MCP Server] âœ… DEBUG: HTTP handler - Token refreshed successfully');
                     } else if (!session) {
                       // Try refresh anyway for header-based auth
                       try {
                         await supabase.auth.refreshSession();
-                        console.log('[MCP Server] ✅ DEBUG: HTTP handler - Token refreshed (header-based auth)');
+                        console.log('[MCP Server] âœ… DEBUG: HTTP handler - Token refreshed (header-based auth)');
                       } catch (refreshErr) {
-                        console.warn('[MCP Server] ⚠️ DEBUG: HTTP handler - Token refresh failed (non-blocking):', refreshErr instanceof Error ? refreshErr.message : String(refreshErr));
+                        console.warn('[MCP Server] âš ï¸ DEBUG: HTTP handler - Token refresh failed (non-blocking):', refreshErr instanceof Error ? refreshErr.message : String(refreshErr));
                       }
                     }
                   } catch (refreshError) {
-                    console.warn('[MCP Server] ⚠️ DEBUG: HTTP handler - Token refresh check failed (non-blocking):', refreshError instanceof Error ? refreshError.message : String(refreshError));
+                    console.warn('[MCP Server] âš ï¸ DEBUG: HTTP handler - Token refresh check failed (non-blocking):', refreshError instanceof Error ? refreshError.message : String(refreshError));
                   }
                 }
                 
-                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - Inserting mcp_log with mcp_type=', success ? 'completed' : 'failed');
+                console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - Inserting mcp_log with mcp_type=', success ? 'completed' : 'failed');
                 const insertPayload: Record<string, unknown> = {
                   build_id: buildId, log_type: 'mcp_log', mcp_type: success ? 'completed' : 'failed',
                   message: success ? 'Prompt execution completed' : (execData.error || 'Prompt execution failed'),
@@ -6558,21 +6616,21 @@ module.exports = {
                 
                 // If JWT expired and we have service role key, retry with service role client
                 if (insertResult.error && insertResult.error.code === 'PGRST301' && hasServiceRole && serviceRoleKey) {
-                  console.log('[MCP Server] 🔄 DEBUG: HTTP handler - JWT expired, retrying with service role key...');
+                  console.log('[MCP Server] ðŸ”„ DEBUG: HTTP handler - JWT expired, retrying with service role key...');
                   const serviceRoleClient = createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } });
                   insertResult = await serviceRoleClient.from('build_logs').insert(insertPayload);
                   if (!insertResult.error) {
-                    console.log('[MCP Server] ✅ DEBUG: HTTP handler mcp_log insert succeeded with service role fallback (mcp_type=' + (success ? 'completed' : 'failed') + ')');
+                    console.log('[MCP Server] âœ… DEBUG: HTTP handler mcp_log insert succeeded with service role fallback (mcp_type=' + (success ? 'completed' : 'failed') + ')');
                   }
                 }
                 
                 if (insertResult.error) {
-                  console.error('[MCP Server] ❌ DEBUG: HTTP handler mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
+                  console.error('[MCP Server] âŒ DEBUG: HTTP handler mcp_log insert failed:', insertResult.error.message, insertResult.error.code, insertResult.error.details);
                 } else {
-                  console.log('[MCP Server] ✅ DEBUG: HTTP handler mcp_log insert succeeded (mcp_type=' + (success ? 'completed' : 'failed') + ')');
+                  console.log('[MCP Server] âœ… DEBUG: HTTP handler mcp_log insert succeeded (mcp_type=' + (success ? 'completed' : 'failed') + ')');
                 }
               } catch (error) {
-                console.error('[MCP Server] ❌ DEBUG: HTTP handler executePrompt exception:', error instanceof Error ? error.message : String(error));
+                console.error('[MCP Server] âŒ DEBUG: HTTP handler executePrompt exception:', error instanceof Error ? error.message : String(error));
                 try {
                   // Try to refresh token before error insert if using user auth
                   if (!hasServiceRole) {
@@ -6591,7 +6649,7 @@ module.exports = {
                   
                   // If JWT expired and we have service role key, retry with service role client
                   if (errorInsertResult.error && errorInsertResult.error.code === 'PGRST301' && hasServiceRole && serviceRoleKey) {
-                    console.log('[MCP Server] 🔄 DEBUG: HTTP handler - JWT expired on error insert, retrying with service role key...');
+                    console.log('[MCP Server] ðŸ”„ DEBUG: HTTP handler - JWT expired on error insert, retrying with service role key...');
                     const serviceRoleClient = createClient(supabaseUrl, serviceRoleKey as string, { auth: { autoRefreshToken: false, persistSession: false } });
                     errorInsertResult = await serviceRoleClient.from('build_logs').insert({
                       build_id: buildId, log_type: 'mcp_log', mcp_type: 'failed',
@@ -6601,12 +6659,12 @@ module.exports = {
                   }
                   
                   if (errorInsertResult.error) {
-                    console.error('[MCP Server] ❌ DEBUG: HTTP handler error mcp_log insert also failed:', errorInsertResult.error.message, errorInsertResult.error.code);
+                    console.error('[MCP Server] âŒ DEBUG: HTTP handler error mcp_log insert also failed:', errorInsertResult.error.message, errorInsertResult.error.code);
                   } else {
-                    console.log('[MCP Server] ✅ DEBUG: HTTP handler error mcp_log insert succeeded');
+                    console.log('[MCP Server] âœ… DEBUG: HTTP handler error mcp_log insert succeeded');
                   }
                 } catch (insertError) {
-                  console.error('[MCP Server] ❌ DEBUG: HTTP handler error mcp_log insert exception:', insertError instanceof Error ? insertError.message : String(insertError));
+                  console.error('[MCP Server] âŒ DEBUG: HTTP handler error mcp_log insert exception:', insertError instanceof Error ? insertError.message : String(insertError));
                 }
               }
             });
@@ -6620,7 +6678,7 @@ module.exports = {
 
       // POST /api/start-build
       if (req.method === 'POST' && (urlPath === '/api/start-build' || urlPath === '/api/start-build/')) {
-        // Optional: API key check (plan §3.1)
+        // Optional: API key check (plan Â§3.1)
         if (apiKey) {
           const headerKey = req.headers['x-api-key'];
           if (headerKey !== apiKey) {
@@ -6677,7 +6735,7 @@ module.exports = {
         return;
       }
 
-      // ──── GET /api/health ────
+      // â”€â”€â”€â”€ GET /api/health â”€â”€â”€â”€
       if (req.method === 'GET' && (urlPath === '/api/health' || urlPath === '/api/health/')) {
         const cursorKeysEncryptionSecretConfigured = (() => {
           const secret = process.env.CURSOR_KEYS_ENCRYPTION_SECRET?.trim();
@@ -6700,7 +6758,7 @@ module.exports = {
         return;
       }
 
-      // ──── GET /api/builds ────
+      // â”€â”€â”€â”€ GET /api/builds â”€â”€â”€â”€
       if (req.method === 'GET' && (urlPath === '/api/builds' || urlPath === '/api/builds/')) {
         const builds = Array.from(this.activeBuildTracker.values());
         res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
@@ -6712,7 +6770,7 @@ module.exports = {
         return;
       }
 
-      // ──── GET /api/builds/:id/agent-status ────
+      // â”€â”€â”€â”€ GET /api/builds/:id/agent-status â”€â”€â”€â”€
       const agentStatusMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/agent-status\/?$/);
       if (req.method === 'GET' && agentStatusMatch) {
         const targetBuildId = agentStatusMatch[1];
@@ -6795,7 +6853,7 @@ module.exports = {
         return;
       }
 
-      // ──── POST /api/builds/:id/preview ────
+      // â”€â”€â”€â”€ POST /api/builds/:id/preview â”€â”€â”€â”€
       const previewStartMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/preview\/?$/);
       if (req.method === 'POST' && previewStartMatch) {
         const targetBuildId = previewStartMatch[1];
@@ -6821,7 +6879,7 @@ module.exports = {
         return;
       }
 
-      // ──── DELETE /api/builds/:id/preview ────
+      // â”€â”€â”€â”€ DELETE /api/builds/:id/preview â”€â”€â”€â”€
       const previewStopMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/preview\/?$/);
       if (req.method === 'DELETE' && previewStopMatch) {
         const targetBuildId = previewStopMatch[1];
@@ -6836,7 +6894,7 @@ module.exports = {
         return;
       }
 
-      // ──── GET /api/sessions ────
+      // â”€â”€â”€â”€ GET /api/sessions â”€â”€â”€â”€
       if (req.method === 'GET' && (urlPath === '/api/sessions' || urlPath === '/api/sessions/')) {
         // Reap any dead workers before listing
         this.buildOrchestrator.reapDeadWorkers();
@@ -6850,7 +6908,7 @@ module.exports = {
         return;
       }
 
-      // ──── POST /api/sessions/:buildId/stop ────
+      // â”€â”€â”€â”€ POST /api/sessions/:buildId/stop â”€â”€â”€â”€
       const sessionStopMatch = urlPath.match(/^\/api\/sessions\/([^/]+)\/stop\/?$/);
       if (req.method === 'POST' && sessionStopMatch) {
         if (apiKey) {
@@ -6948,7 +7006,7 @@ module.exports = {
 
   private async processMessage(message: any) {
     try {
-      console.log('[MCP Server] Processing message:', message);
+                console.log('[MCP Server] Processing message:', message);
       
       if (message.type === 'request' && message.method) {
         const toolName = message.method;
@@ -7153,3 +7211,6 @@ if (mode === 'cursor') {
   console.error('Starting MCP server in WebSocket mode...');
   server.runWebSocket().catch(console.error);
 }
+
+
+
