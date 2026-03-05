@@ -1,4 +1,4 @@
-﻿import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { exec, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
@@ -6521,9 +6521,9 @@ module.exports = {
             const data = JSON.parse(body || '{}') as {
               buildId?: string; projectId?: string; promptId?: string; promptContent?: string; prompt?: string; projectPath?: string;
               timeout?: number; context?: string; supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
-              provider?: 'cursor' | 'claude-code'; model?: string; cursorApiKey?: string;
+              provider?: 'cursor' | 'claude-code'; model?: string; cursorApiKey?: string; userId?: string;
             };
-            const { buildId, projectId, promptId, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey, provider, model, cursorApiKey } = data;
+            const { buildId, projectId, promptId, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey, provider, model, cursorApiKey, userId: payloadUserId } = data;
             // Accept both field names: promptContent (build-phase callers) and prompt (build-worker)
             const promptContent = data.promptContent ?? data.prompt;
             
@@ -6552,7 +6552,13 @@ module.exports = {
                 : createClient(supabaseUrl, anonKey as string, { global: { headers: { Authorization: `Bearer ${accessToken}` } } });
               
               let resolvedUserId: string | undefined;
-              if (accessToken) {
+              // When the caller is a trusted server-side source (provides serviceRoleKey) and
+              // has already validated the user (provides userId), trust it directly to avoid
+              // a redundant getUser() call that can fail on expired tokens.
+              if (payloadUserId && serviceRoleKey) {
+                resolvedUserId = payloadUserId;
+                console.log('[MCP Server] 🔍 DEBUG: HTTP handler - resolvedUserId from trusted payload=', resolvedUserId);
+              } else if (accessToken) {
                 try {
                   const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
                   if (userError) {
