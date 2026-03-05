@@ -6488,6 +6488,7 @@ module.exports = {
             console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasPromptContent=', !!promptContent, 'promptLength=', promptContent?.length || 0);
             console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasSupabaseUrl=', !!supabaseUrl, 'hasServiceRoleKey=', !!serviceRoleKey, 'hasAnonKey=', !!anonKey, 'hasAccessToken=', !!accessToken);
             console.log('[MCP Server] 🔍 DEBUG: Parsed request - provider=', provider || 'cursor (default)');
+            console.log('[MCP Server] 🔍 DEBUG: Parsed request - hasCursorApiKey=', !!cursorApiKey);
             const hasServiceRole = !!serviceRoleKey;
             const hasUserAuth = !!anonKey && !!accessToken;
             if (!buildId || !projectId || !promptContent || !projectPath || !supabaseUrl || (!hasServiceRole && !hasUserAuth)) {

@@ -1436,6 +1436,14 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
     console.log('[BuildRunner] ℹ️ Claude Code provider selected — skipping Cursor API key fetch');
   }
 
+  if (buildProvider === 'cursor') {
+    const hasCursorApiKey = !!cursorApiKey;
+    console.log(`[BuildRunner] Cursor API key ${hasCursorApiKey ? 'present' : 'missing'} before runBuildLoop (buildId=${buildId})`);
+    if (!hasCursorApiKey && cursorApiKeyError) {
+      console.warn(`[BuildRunner] Cursor API key error: ${cursorApiKeyError}`);
+    }
+  }
+
   await runBuildLoop(supabaseForBuild, buildId, {
     createProjectFn,
     executePromptFn,

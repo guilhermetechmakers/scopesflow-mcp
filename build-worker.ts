@@ -158,6 +158,7 @@ async function main() {
 
   /** Call dispatcher's /api/execute-prompt. */
   const executePromptFn = async (args: BuildExecutePromptArgs): Promise<unknown> => {
+    console.log(`[BuildWorker] execute-prompt: buildId=${args.buildId ?? 'unknown'}, hasCursorApiKey=${!!args.cursorApiKey}`);
     const res = await fetch(`${DISPATCHER_URL}/api/execute-prompt`, {
       method: 'POST',
       headers,
