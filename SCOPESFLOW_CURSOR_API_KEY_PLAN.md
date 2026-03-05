@@ -14,7 +14,7 @@ ScopesFlow must allow users to **add their own Cursor API key** in a settings sc
 - `build-runner.ts` fetches the key by `user_id` at build start
 - `server.ts` injects `CURSOR_API_KEY` into each `cursor-agent` process
 - Worker session isolation (`build-worker.ts`) for per-build logs
-- `MCP_REQUIRE_CURSOR_API_KEY=true` flag to enforce key presence
+- Per-user keys are required; server-level fallback is disabled
 
 **What the ScopesFlow app needs (this plan):**
 - Settings UI for key management
@@ -434,7 +434,7 @@ if (!hasKey) {
 3. Add `CURSOR_KEYS_ENCRYPTION_SECRET` to Supabase secrets
 4. Deploy ScopesFlow app with Settings UI + preflight check
 5. Announce to users: "Add your Cursor API key in Settings"
-6. After adoption period, enable `MCP_REQUIRE_CURSOR_API_KEY=true` on VPS to enforce
+6. Per-user keys are enforced on the MCP server (no server-level fallback)
 
 ---
 

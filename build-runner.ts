@@ -1365,6 +1365,7 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
 
   // ──── Fetch Cursor API key once per build (only for cursor provider) ────
   let cursorApiKey: string | undefined;
+  let cursorApiKeyError: string | undefined;
   if (buildProvider === 'cursor') {
     try {
       const dbClient = supabaseServiceRoleKey
@@ -1379,10 +1380,12 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
 
       if (keyError) {
         console.warn(`[BuildRunner] ⚠️ Error fetching Cursor API key: ${keyError.message}`);
+        cursorApiKeyError = 'Failed to fetch your Cursor API key. Please try again.';
       } else if (keyRow && typeof keyRow === 'object') {
         const row = keyRow as { api_key_ciphertext?: string; revoked_at?: string | null };
         if (row.revoked_at) {
           console.warn('[BuildRunner] ⚠️ Cursor API key has been revoked');
+          cursorApiKeyError = 'Your Cursor API key was revoked. Please add a new key in Settings.';
         } else if (row.api_key_ciphertext) {
           try {
             cursorApiKey = decryptCursorApiKey(row.api_key_ciphertext);
@@ -1392,49 +1395,38 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
               '[BuildRunner] ⚠️ Failed to decrypt Cursor API key:',
               decryptErr instanceof Error ? decryptErr.message : 'unknown error'
             );
-            // Fall back to server-level CURSOR_API_KEY env var (e.g. when CURSOR_KEYS_ENCRYPTION_SECRET is not set on this server)
-            const envFallback = process.env.CURSOR_API_KEY?.trim();
-            if (envFallback) {
-              cursorApiKey = envFallback;
-              console.log('[BuildRunner] ✅ Using server-level CURSOR_API_KEY env var as fallback (decryption failed)');
-            }
+            cursorApiKeyError =
+              'Failed to decrypt your Cursor API key. Ensure CURSOR_KEYS_ENCRYPTION_SECRET is set on the MCP server and matches the Supabase Edge Functions secret.';
           }
           try {
             await dbClient.from('cursor_api_keys').update({ last_used_at: new Date().toISOString() }).eq('user_id', user.id);
           } catch { /* non-blocking */ }
         } else {
           console.warn('[BuildRunner] ⚠️ Cursor API key row found but api_key_ciphertext is empty');
-          const envFallback = process.env.CURSOR_API_KEY?.trim();
-          if (envFallback) {
-            cursorApiKey = envFallback;
-            console.log('[BuildRunner] ✅ Using server-level CURSOR_API_KEY env var as fallback (empty ciphertext)');
-          }
+          cursorApiKeyError = 'Your Cursor API key appears empty. Please re-save your key in Settings.';
         }
       } else {
         console.warn(`[BuildRunner] ⚠️ No Cursor API key found for user_id: ${user.id}`);
-        const envFallback = process.env.CURSOR_API_KEY?.trim();
-        if (envFallback) {
-          cursorApiKey = envFallback;
-          console.log('[BuildRunner] ✅ Using server-level CURSOR_API_KEY env var as fallback (no DB row)');
-        }
+        cursorApiKeyError = 'Cursor API key not configured. Please add your key in Settings.';
       }
     } catch (error) {
       console.warn('[BuildRunner] ⚠️ Exception fetching Cursor API key:', error instanceof Error ? error.message : 'Unknown error');
-      const envFallback = process.env.CURSOR_API_KEY?.trim();
-      if (envFallback) {
-        cursorApiKey = envFallback;
-        console.log('[BuildRunner] ✅ Using server-level CURSOR_API_KEY env var as fallback (fetch exception)');
-      }
+      cursorApiKeyError = 'Failed to fetch your Cursor API key. Please try again.';
     }
 
-    if (!cursorApiKey && process.env.MCP_REQUIRE_CURSOR_API_KEY === 'true') {
-      console.error('[BuildRunner] Cursor API key not configured for this user. Build cannot proceed.');
+    if (!cursorApiKey) {
+      const userMessage =
+        cursorApiKeyError ?? 'Cursor API key not configured for this user. Please add your API key in Settings.';
+      console.error(`[BuildRunner] ${userMessage}`);
       try {
-        await supabaseForBuild.from('automated_builds').update({ status: 'failed', updated_at: new Date().toISOString() }).eq('id', buildId);
+        await supabaseForBuild
+          .from('automated_builds')
+          .update({ status: 'failed', updated_at: new Date().toISOString() })
+          .eq('id', buildId);
         await supabaseForBuild.from('build_logs').insert({
           build_id: buildId,
           log_type: 'build_log',
-          message: 'Cursor API key not configured for this user. Please add your API key in Settings.',
+          message: userMessage,
           created_at: new Date().toISOString(),
         });
       } catch { /* non-blocking */ }

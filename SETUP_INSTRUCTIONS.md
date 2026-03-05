@@ -1,14 +1,14 @@
-# Setup Instructions for Fixed MCP Server
+﻿# Setup Instructions for Fixed MCP Server
 
-## 🎉 Fixes Applied
+## ðŸŽ‰ Fixes Applied
 
 All JSON parsing errors have been fixed in the MCP server! The server now:
-- ✅ Handles non-JSON responses from OpenAI gracefully
-- ✅ Retries automatically (up to 3 times) with exponential backoff
-- ✅ Validates responses before processing
-- ✅ Provides detailed logging for debugging
+- âœ… Handles non-JSON responses from OpenAI gracefully
+- âœ… Retries automatically (up to 3 times) with exponential backoff
+- âœ… Validates responses before processing
+- âœ… Provides detailed logging for debugging
 
-## 🚀 Getting Started
+## ðŸš€ Getting Started
 
 ### 1. Configure Environment Variables
 
@@ -36,20 +36,16 @@ MCP_SERVER_HOST=localhost
 # Set MCP_BUILD_API_KEY to match Supabase Edge Function secret for POST /api/start-build.
 # MCP_BUILD_API_KEY=your-long-random-secret
 
-# ── Cursor API Key (automated builds) ──────────────────────────────
-# OPTION A (recommended): provide the encryption secret so per-user keys
-# stored in Supabase can be decrypted at build time.
-# Must be the same 64-hex-char value set in Supabase Dashboard →
-# Edge Functions → Secrets → CURSOR_KEYS_ENCRYPTION_SECRET.
+# â”€â”€ Cursor API Key (automated builds) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Per-user only: provide the encryption secret so per-user keys stored in
+# Supabase can be decrypted at build time.
+# Must be the same 64-hex-char value set in Supabase Dashboard â†’
+# Edge Functions â†’ Secrets â†’ CURSOR_KEYS_ENCRYPTION_SECRET.
 CURSOR_KEYS_ENCRYPTION_SECRET=your-64-hex-char-secret-here
-
-# OPTION B (simpler fallback): a single server-level Cursor API key.
-# Used automatically whenever per-user decryption fails or no key is found.
-# Per-user keys (Option A) always take priority over this value.
-CURSOR_API_KEY=your-cursor-api-key-here
+# Server-level CURSOR_API_KEY fallback is no longer used.
 ```
 
-⚠️ **Important:** Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key from https://platform.openai.com/api-keys
+âš ï¸ **Important:** Replace `sk-your-actual-openai-api-key-here` with your real OpenAI API key from https://platform.openai.com/api-keys
 
 ### 2. Install Dependencies (if not already done)
 
@@ -73,7 +69,7 @@ npm start
 npm start -- --cursor
 ```
 
-## 🔧 What Was Fixed
+## ðŸ”§ What Was Fixed
 
 ### JSON Parsing Error
 **Before:** 
@@ -94,10 +90,10 @@ Failed to implement AI-generated code: SyntaxError: Unexpected token 'G', "Given
 2. **Retry Logic** - Automatic retries with 2s, 4s, 8s delays
 3. **Response Validation** - Validates JSON structure before processing
 4. **Better JSON Extraction** - Multiple methods to extract JSON from text
-5. **Enhanced Logging** - ✓/✗ indicators for easy debugging
+5. **Enhanced Logging** - âœ“/âœ— indicators for easy debugging
 6. **Model Switch** - Using `gpt-4o-mini` for better cost/performance
 
-## 📝 Testing the Fixes
+## ðŸ“ Testing the Fixes
 
 ### Test 1: Check Server Startup
 ```bash
@@ -117,12 +113,12 @@ Use your frontend to create a project and execute a prompt. The logs should show
 
 ```
 [MCP Server] Attempt 1/3...
-[MCP Server] ✓ AI response received (1234 characters)
-[MCP Server] ✓ Response validation successful
-[MCP Server] ✓ Successfully parsed AI response as JSON
+[MCP Server] âœ“ AI response received (1234 characters)
+[MCP Server] âœ“ Response validation successful
+[MCP Server] âœ“ Successfully parsed AI response as JSON
 [MCP Server] Processing 3 file(s)...
-[MCP Server] ✓ Created file: src/App.tsx
-[MCP Server] ✓ Created file: src/components/Button.tsx
+[MCP Server] âœ“ Created file: src/App.tsx
+[MCP Server] âœ“ Created file: src/components/Button.tsx
 [MCP Server] Implementation complete: 3 created, 0 modified
 ```
 
@@ -132,14 +128,14 @@ If the AI returns invalid JSON, you should see automatic retries:
 
 ```
 [MCP Server] Attempt 1/3...
-[MCP Server] ✗ Attempt 1 failed: Invalid AI response
+[MCP Server] âœ— Attempt 1 failed: Invalid AI response
 [MCP Server] Retrying in 2000ms...
 [MCP Server] Attempt 2/3...
-[MCP Server] ✓ AI response received
-[MCP Server] ✓ Response validation successful
+[MCP Server] âœ“ AI response received
+[MCP Server] âœ“ Response validation successful
 ```
 
-## 🐛 React Flow Warning (Frontend Fix Needed)
+## ðŸ› React Flow Warning (Frontend Fix Needed)
 
 The React Flow warning in your console:
 ```
@@ -152,7 +148,7 @@ This needs to be fixed in your **frontend application**, not the MCP server.
 
 Find where you're using `<ReactFlow>` and update it:
 
-**❌ Before (causes warning):**
+**âŒ Before (causes warning):**
 ```typescript
 function MyComponent() {
   return (
@@ -168,7 +164,7 @@ function MyComponent() {
 }
 ```
 
-**✅ After (fixed):**
+**âœ… After (fixed):**
 ```typescript
 // Define outside the component
 const nodeTypes = {
@@ -189,7 +185,7 @@ function MyComponent() {
 }
 ```
 
-**✅ Alternative (using useMemo):**
+**âœ… Alternative (using useMemo):**
 ```typescript
 function MyComponent() {
   const nodeTypes = useMemo(() => ({
@@ -209,12 +205,12 @@ function MyComponent() {
 }
 ```
 
-## 📊 Monitoring and Logs
+## ðŸ“Š Monitoring and Logs
 
 ### Useful Log Indicators
 
-- `✓` - Success
-- `✗` - Failure (will retry)
+- `âœ“` - Success
+- `âœ—` - Failure (will retry)
 - `[MCP Server] Attempt X/3` - Retry attempt number
 - `Response preview:` - Shows first 300 chars of AI response
 - `filesCreated` / `filesModified` - Number of files changed
@@ -228,22 +224,22 @@ function MyComponent() {
 | `Project directory does not exist` | Ensure the project path is correct |
 | Connection refused on port 3001 | Check if another process is using port 3001, or change `MCP_SERVER_PORT` in `.env` |
 
-## 🎯 Next Steps
+## ðŸŽ¯ Next Steps
 
-1. ✅ Create `.env` file with your OpenAI API key
-2. ✅ Start the MCP server: `npm start`
-3. ✅ Test project creation and AI code generation
-4. ⚠️ Fix React Flow warning in your frontend (see above)
-5. 📊 Monitor console logs for any issues
+1. âœ… Create `.env` file with your OpenAI API key
+2. âœ… Start the MCP server: `npm start`
+3. âœ… Test project creation and AI code generation
+4. âš ï¸ Fix React Flow warning in your frontend (see above)
+5. ðŸ“Š Monitor console logs for any issues
 
-## 💡 Tips
+## ðŸ’¡ Tips
 
 - **Cost Optimization**: The server now uses `gpt-4o-mini` which is much cheaper than `gpt-4o`
 - **Token Limit**: Increased from 4000 to 16000 tokens for larger projects
 - **Retries**: Automatic retries mean temporary API issues won't fail your builds
 - **Logging**: Use the console logs to debug issues - they're very detailed now
 
-## 🆘 Still Having Issues?
+## ðŸ†˜ Still Having Issues?
 
 1. Check console logs for detailed error messages
 2. Verify your OpenAI API key: https://platform.openai.com/api-keys
@@ -253,9 +249,10 @@ function MyComponent() {
 
 ---
 
-**All server-side fixes are complete and tested!** 🎉
+**All server-side fixes are complete and tested!** ðŸŽ‰
 
 The only remaining issue is the React Flow warning in your frontend application.
+
 
 
 

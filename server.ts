@@ -1988,6 +1988,34 @@ When implementing this project:
 
       await appendBuildLog('Git config loaded');
 
+      const isCursorProvider = args.provider !== 'claude-code';
+      if (isCursorProvider) {
+        const hasCursorKey = typeof args.cursorApiKey === 'string' && args.cursorApiKey.trim().length > 0;
+        console.log(`[MCP Server] Cursor API key ${hasCursorKey ? 'provided' : 'missing'} (per-user only)`);
+        if (!hasCursorKey) {
+          const msg = 'Cursor API key not configured for this user. Please add your key in Settings.';
+          await appendBuildLog(msg, 'error');
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  success: false,
+                  output: '',
+                  error: msg,
+                  filesChanged: [],
+                  timeElapsed: Date.now() - startTime,
+                  timedOut: false,
+                  partialCompletion: false,
+                  retried: args.isRetry || false,
+                  fallbackMode: 'none'
+                })
+              }
+            ]
+          };
+        }
+      }
+
       // Execute prompt using Cursor Agent CLI
       // The cursor-agent command will:
       // 1. Analyze the project context
@@ -2489,8 +2517,8 @@ Analyze the existing project structure and implement the task following the patt
         // Use --print flag for non-interactive mode, --force to allow commands
         // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
         const modelArg = args.model || 'composer-1.5';
-        // Resolve effective key: per-user Supabase key takes priority, then server-level env fallback.
-        const effectiveKey = args.cursorApiKey ?? process.env.CURSOR_API_KEY;
+        // Per-user key only (no server fallback)
+        const effectiveKey = args.cursorApiKey?.trim();
         // Use export inside the bash -c string (single-quoted value) instead of --api-key "..." because
         // double quotes inside a double-quoted bash -c string break cmd.exe parsing on Windows.
         const wslEnvPrefix = effectiveKey ? `export CURSOR_API_KEY='${effectiveKey}' && ` : '';
@@ -2501,10 +2529,7 @@ Analyze the existing project structure and implement the task following the patt
         await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
         
         const modelArg = args.model || 'composer-1.5';
-        // Resolve effective key: per-user Supabase key takes priority, then server-level env fallback.
-        const effectiveKey = args.cursorApiKey ?? process.env.CURSOR_API_KEY;
-        const apiKeyFlag = effectiveKey ? `--api-key '${effectiveKey}'` : '';
-        command = `cat .cursor-prompt.tmp | cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
+        command = `cat .cursor-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
       }
       
       await appendBuildLog('Starting Cursor Agent...');
@@ -3722,7 +3747,19 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         // Don't fail the fix attempt if npm install fails - agent might be able to fix it
       }
       
-      if (provider === 'claude-code') {
+      const effectiveProvider = provider === 'claude-code' ? 'claude-code' : 'cursor';
+      if (effectiveProvider === 'cursor') {
+        const hasKey = typeof cursorApiKey === 'string' && cursorApiKey.trim().length > 0;
+        console.log(`[MCP Server] Cursor API key ${hasKey ? 'provided' : 'missing'} for auto-fix (per-user only)`);
+        if (!hasKey) {
+          return {
+            success: false,
+            message: 'Cursor API key not configured. Cannot run cursor-agent to fix build errors.'
+          };
+        }
+      }
+
+      if (effectiveProvider === 'claude-code') {
         console.log(`[MCP Server] Executing Claude Code to fix errors...`);
         await this.executeClaudeCodeStreaming(
           fixPrompt,
@@ -3743,11 +3780,10 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
             .replace(/^([A-Z]):/i, (match: string, drive: string) => `/mnt/${drive.toLowerCase()}`);
 
           const wslPromptFile = wslProjectPath + '/.cursor-fix-prompt.tmp';
-          const apiKeyFlag = cursorApiKey ? `--api-key "${cursorApiKey}"` : '';
-          command = `wsl -d Ubuntu bash -c "cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
+          const wslEnvPrefix = cursorApiKey ? `export CURSOR_API_KEY='${cursorApiKey}' && ` : '';
+          command = `wsl -d Ubuntu bash -c "${wslEnvPrefix}cd '${wslProjectPath}' && cat '${wslPromptFile}' | ~/.local/bin/cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}"`;
         } else {
-          const apiKeyFlag = cursorApiKey ? `--api-key "${cursorApiKey}"` : '';
-          command = `cat .cursor-fix-prompt.tmp | cursor-agent ${apiKeyFlag} --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
+          command = `cat .cursor-fix-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
         }
 
         console.log(`[MCP Server] Executing cursor-agent to fix errors...`);
@@ -3887,10 +3923,9 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       console.log('[MCP Server] Starting cursor-agent with streaming output...');
       addLog('info', 'Starting cursor-agent with streaming output');
       
-      // Build env with per-user key taking priority, then server-level env fallback.
-      const effectiveSpawnKey = cursorApiKey ?? process.env.CURSOR_API_KEY;
-      const spawnEnv = effectiveSpawnKey
-        ? { ...process.env, CURSOR_API_KEY: effectiveSpawnKey }
+      // Build env with per-user key only (no server fallback).
+      const spawnEnv = cursorApiKey
+        ? { ...process.env, CURSOR_API_KEY: cursorApiKey }
         : process.env;
 
       // Spawn the process (empty args array to avoid DEP0190 deprecation with shell: true)
@@ -6643,12 +6678,18 @@ module.exports = {
 
       // ──── GET /api/health ────
       if (req.method === 'GET' && (urlPath === '/api/health' || urlPath === '/api/health/')) {
+        const cursorKeysEncryptionSecretConfigured = (() => {
+          const secret = process.env.CURSOR_KEYS_ENCRYPTION_SECRET?.trim();
+          return !!secret && /^[0-9a-fA-F]{64}$/.test(secret);
+        })();
         const health = {
           status: 'ok',
           uptime: process.uptime(),
           activeBuilds: this.activeBuildTracker.size,
           cursorAgentAvailable: this.cursorAgentAvailable,
           claudeCodeAvailable: this.claudeCodeAvailable,
+          cursorKeysEncryptionSecretConfigured,
+          cursorAuthMode: 'per-user-only',
           memoryUsage: process.memoryUsage(),
           diskSpace: await getDiskSpace(),
           timestamp: new Date().toISOString(),
