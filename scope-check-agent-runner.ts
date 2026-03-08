@@ -13,6 +13,7 @@ interface ScopeCheckAgentOptions {
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
   shouldStop?: () => boolean;
+  resolveModelForStep?: (baseModel: string | undefined) => Promise<string | undefined>;
 }
 
 interface GeneratePagePromptResponse {
@@ -29,7 +30,10 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
   const {
     supabase, buildId, projectId, projectPath,
     executePromptFn, model, cursorApiKey, provider, githubAuth, userId, shouldStop,
+    resolveModelForStep,
   } = options;
+
+  let effectiveModel = model;
 
   const log = (msg: string, level: 'info' | 'warn' | 'error' = 'info') => {
     console.error(`[ScopeCheckAgent] ${msg}`);
@@ -126,6 +130,10 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
       continue;
     }
 
+    if (resolveModelForStep) {
+      effectiveModel = (await resolveModelForStep(effectiveModel)) ?? effectiveModel;
+    }
+
     let stepRowId: string | null = null;
     try {
       const { data: stepRow } = await supabase.from('build_steps').insert({
@@ -147,7 +155,7 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
       timeout: 300000,
       context: `Scope-Check: ${page.title}`,
       isFirstPrompt: false,
-      model,
+      model: effectiveModel,
       cursorApiKey,
       provider,
       supabaseClient: supabase,

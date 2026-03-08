@@ -34,6 +34,8 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY?.trim();
 const SUPABASE_ACCESS_TOKEN = process.env.SUPABASE_ACCESS_TOKEN?.trim();
 const SERVICE_ROLE_KEY = process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
 const FEEDBACK_SESSION_ID = process.env.FEEDBACK_SESSION_ID?.trim();
+const TARGET_SUPABASE_URL = process.env.TARGET_SUPABASE_URL?.trim();
+const TARGET_SUPABASE_ANON_KEY = process.env.TARGET_SUPABASE_ANON_KEY?.trim();
 
 if (!BUILD_ID || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
   console.error('[BuildWorker] Missing required env: BUILD_ID, SUPABASE_URL, SUPABASE_ANON_KEY');
@@ -202,6 +204,8 @@ async function main() {
       accessToken: SUPABASE_ACCESS_TOKEN || '',
       anonKey: SUPABASE_ANON_KEY!,
       supabaseServiceRoleKey: SERVICE_ROLE_KEY,
+      targetSupabaseUrl: TARGET_SUPABASE_URL,
+      targetSupabaseAnonKey: TARGET_SUPABASE_ANON_KEY,
       createProjectFn,
       executePromptFn,
       activeBuildTracker,

@@ -2,6 +2,7 @@ import * as path from 'path';
 import { access } from 'fs/promises';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { runDesignAgent } from './design-agent-runner.js';
+import { runUIDesignImprovementsAgent } from './ui-design-improvements-agent-runner.js';
 import { runDebugAgent } from './debug-agent-runner.js';
 import { runScopeCheckAgent } from './scope-check-agent-runner.js';
 import { decryptCursorApiKey } from './crypto-utils.js';
@@ -106,6 +107,8 @@ export interface RunBuildLoopOptions {
   /** AI provider for this build. */
   provider?: BuildProvider;
   shouldStop?: () => boolean;
+  /** Optional feedback session ID for feedback-phase re-process. */
+  feedbackSessionId?: string;
 }
 
 export interface RunBuildFromPayloadOptions {
@@ -115,12 +118,17 @@ export interface RunBuildFromPayloadOptions {
   anonKey: string;
   /** Optional service role key for build DB operations (bypasses RLS, avoids JWT expiry during long builds) */
   supabaseServiceRoleKey?: string;
+  /** User's target Supabase project (from build_supabase_connections) for db push and Edge Function deployment */
+  targetSupabaseUrl?: string;
+  targetSupabaseAnonKey?: string;
   createProjectFn: CreateProjectFn;
   executePromptFn: ExecutePromptFn;
   /** Shared in-memory build tracker (updated by the loop, read by HTTP endpoints). */
   activeBuildTracker?: Map<string, ActiveBuildEntry>;
   /** Optional stop signal for in-process builds. */
   shouldStop?: () => boolean;
+  /** Optional feedback session ID for feedback-phase re-process. */
+  feedbackSessionId?: string;
 }
 
 /** Row from automated_builds (expected columns). */
@@ -135,6 +143,7 @@ export interface AutomatedBuildRow {
   cursor_project_path?: string | null;
   /** Last completed step index (0-based, used for resume). */
   current_step?: number | null;
+  total_steps?: number | null;
   configuration?: {
     cursorConfig?: BuildCursorConfig;
     prompts?: string[];
@@ -322,6 +331,41 @@ export async function runBuildLoop(
       activeBuildTracker.delete(buildId);
     }
     return true;
+  };
+
+  /**
+   * Resolve effective model for the next step: pendingModel if set, else currentModel, else baseModel.
+   * When pendingModel is set, promote it to currentModel and clear pendingModel before returning.
+   * Call at the start of each step so model changes take effect on the next prompt without disrupting the current one.
+   */
+  const resolveModelForStep = async (baseModel: string | undefined): Promise<string | undefined> => {
+    try {
+      const { data: cfgRow } = await supabase
+        .from('automated_builds')
+        .select('configuration')
+        .eq('id', buildId)
+        .single();
+
+      const cfg = cfgRow?.configuration as Record<string, unknown> | null | undefined;
+      if (!cfg || typeof cfg !== 'object') return baseModel;
+
+      const pending = typeof cfg.pendingModel === 'string' && cfg.pendingModel.trim() ? cfg.pendingModel.trim() : undefined;
+      const current = typeof cfg.currentModel === 'string' && cfg.currentModel.trim() ? cfg.currentModel.trim() : undefined;
+      const configModel = typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model.trim() : undefined;
+
+      const effectiveModel = pending ?? current ?? configModel ?? baseModel;
+
+      if (pending) {
+        const updated = { ...cfg, currentModel: pending, pendingModel: undefined };
+        await supabase.from('automated_builds').update({ configuration: updated }).eq('id', buildId);
+        console.error(`[BuildRunner] Model transition: pendingModel "${pending}" promoted to currentModel`);
+      }
+
+      return effectiveModel;
+    } catch (err) {
+      console.error('[BuildRunner] resolveModelForStep error (non-blocking):', err);
+      return baseModel;
+    }
   };
 
   const { data: buildRow, error: fetchError } = await supabase
@@ -639,9 +683,14 @@ export async function runBuildLoop(
       (configuration as { projectId?: string; project_id?: string }).project_id ??
       row.project_id ?? '';
 
-    // Extract model from configuration (can be at top level or in cursorConfig)
-    const rawModel = (mergedCursorConfig as { model?: unknown }).model ?? (configuration as { model?: unknown }).model;
-    const model = typeof rawModel === 'string' && rawModel.trim().length > 0 ? rawModel.trim() : undefined;
+    // Extract model from configuration (currentModel, pendingModel, or model/cursorConfig.model)
+    const cfgObj = configuration as Record<string, unknown>;
+    const rawModel =
+      cfgObj.currentModel ??
+      cfgObj.pendingModel ??
+      (mergedCursorConfig as { model?: unknown }).model ??
+      cfgObj.model;
+    let model = typeof rawModel === 'string' && rawModel.trim().length > 0 ? rawModel.trim() : undefined;
 
     // Timeout per step from automationSettings or default 5 min
     const timeoutPerStep =
@@ -721,8 +770,11 @@ export async function runBuildLoop(
         : promptContent.replace(/\n/g, ' ');
       await appendLog(`Running prompt ${currentStep}/${totalSteps}: ${preview}`);
 
+      // Resolve model for this step (applies pendingModel if set, promotes to currentModel)
+      model = (await resolveModelForStep(model)) ?? model;
+
       console.log(`[BuildRunner] Starting prompt ${currentStep}/${totalSteps}`);
-      console.log(`[BuildRunner] buildId=${buildId}, projectPath=${projectPath}`);
+      console.log(`[BuildRunner] buildId=${buildId}, projectPath=${projectPath}, model=${model ?? 'default'}`);
 
       // ──── Record step start in build_steps ────
       const stepStartMs = Date.now();
@@ -967,6 +1019,9 @@ export async function runBuildLoop(
 
         await appendLog(`Agent loop prompt ${currentStep}/${totalSteps}: ${preview}`);
 
+        // Resolve model for this step (applies pendingModel if set, promotes to currentModel)
+        model = (await resolveModelForStep(model)) ?? model;
+
         let stepRowId: string | null = null;
         try {
           const { data: stepRow } = await supabase.from('build_steps').insert({
@@ -1046,9 +1101,26 @@ export async function runBuildLoop(
 
     }
 
+    // Guard: only run scope-check/design/debug when developer phase actually completed
+    if (currentAgentPhase === 'developer') {
+      const { data: buildAfterDev } = await supabase
+        .from('automated_builds')
+        .select('developer_completed_at')
+        .eq('id', buildId)
+        .single();
+
+      const developerActuallyCompleted = !!buildAfterDev?.developer_completed_at;
+
+      if (!developerActuallyCompleted) {
+        await appendLog('Developer phase did not complete (no prompts or errors). Skipping scope-check/design/debug.');
+        await updateStatus('running');
+        return;
+      }
+    }
+
     // ══════ AGENT PIPELINE ORCHESTRATION ══════
 
-    const phaseOrder = ['developer', 'scope-check', 'design', 'debug', 'feedback'] as const;
+    const phaseOrder = ['developer', 'scope-check', 'design', 'ui-design-improvements', 'debug', 'feedback'] as const;
     const startIndex = phaseOrder.indexOf(currentAgentPhase as (typeof phaseOrder)[number]);
     const normalizedStartIndex = startIndex === -1 ? 0 : startIndex;
 
@@ -1064,6 +1136,7 @@ export async function runBuildLoop(
       githubAuth,
       userId: row.user_id,
       shouldStop,
+      resolveModelForStep: (base: string | undefined) => resolveModelForStep(base),
     };
 
     // Phase 2: Scope-Check Agent
@@ -1096,8 +1169,23 @@ export async function runBuildLoop(
       await appendLog(`Skipping Design Agent (current phase: ${currentAgentPhase})`);
     }
 
-    // Phase 4: Debug Agent
+    // Phase 4: UI Design Improvements Agent (runs after Design, before Debug)
     if (normalizedStartIndex <= 3) {
+      if (await stopIfRequested('ui-design-improvements phase')) return;
+      try {
+        await appendLog('Starting UI Design Improvements Agent phase...');
+        await runUIDesignImprovementsAgent(agentOptions);
+        await appendLog('UI Design Improvements Agent phase completed.');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await appendLog(`UI Design Improvements Agent failed: ${msg}`, 'error');
+      }
+    } else {
+      await appendLog(`Skipping UI Design Improvements Agent (current phase: ${currentAgentPhase})`);
+    }
+
+    // Phase 5: Debug Agent
+    if (normalizedStartIndex <= 4) {
       if (await stopIfRequested('debug phase')) return;
       try {
         await appendLog('Starting Debug Agent phase...');
@@ -1111,7 +1199,7 @@ export async function runBuildLoop(
       await appendLog(`Skipping Debug Agent (current phase: ${currentAgentPhase})`);
     }
 
-    // Phase 5: Feedback Agent (executes feedback-generated prompts)
+    // Phase 6: Feedback Agent (executes feedback-generated prompts)
     if (currentAgentPhase === 'feedback') {
       if (await stopIfRequested('feedback phase')) return;
       await appendLog('Starting Feedback Agent phase...');
@@ -1135,6 +1223,9 @@ export async function runBuildLoop(
           ? `${promptContent.substring(0, 60).replace(/\n/g, ' ')}...`
           : promptContent.replace(/\n/g, ' ');
         await appendLog(`Feedback prompt ${feedbackStep}/${feedbackTotal}: ${preview}`);
+
+        // Resolve model for this step (applies pendingModel if set, promotes to currentModel)
+        model = (await resolveModelForStep(model)) ?? model;
 
         const stepStartMs = Date.now();
         const stepStartTime = new Date().toISOString();
@@ -1280,7 +1371,7 @@ export async function runBuildLoop(
  * then run the build loop with config overrides.
  */
 export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): Promise<void> {
-  const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, createProjectFn, executePromptFn, activeBuildTracker, shouldStop } = options;
+  const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, targetSupabaseUrl, targetSupabaseAnonKey, createProjectFn, executePromptFn, activeBuildTracker, shouldStop, feedbackSessionId } = options;
 
   const supabaseUser: SupabaseClient = createClient(supabaseUrl, anonKey, {
     global: { headers: { Authorization: `Bearer ${accessToken}` } },
@@ -1444,17 +1535,22 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
     }
   }
 
+  const configOverrides: Partial<BuildCursorConfig> = {};
+  if (targetSupabaseUrl && targetSupabaseAnonKey) {
+    configOverrides.supabaseUrl = targetSupabaseUrl;
+    configOverrides.supabaseAnonKey = targetSupabaseAnonKey;
+    console.log(`[BuildRunner] Target Supabase project connected (for db push, Edge Functions)`);
+  }
+
   await runBuildLoop(supabaseForBuild, buildId, {
     createProjectFn,
     executePromptFn,
     githubAuth,
-    configOverrides: {
-      supabaseUrl,
-      supabaseAnonKey: anonKey,
-    },
+    configOverrides,
     activeBuildTracker,
     cursorApiKey,
     provider: buildProvider,
     shouldStop,
+    feedbackSessionId,
   });
 }

@@ -39,6 +39,7 @@ interface DebugAgentOptions {
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
   shouldStop?: () => boolean;
+  resolveModelForStep?: (baseModel: string | undefined) => Promise<string | undefined>;
 }
 
 interface FoundIssue {
@@ -227,7 +228,10 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
     executePromptFn, model, cursorApiKey, provider, githubAuth, userId, shouldStop,
+    resolveModelForStep,
   } = options;
+
+  let effectiveModel = model;
 
   const log = (msg: string) => {
     console.error(`[DebugAgent] ${msg}`);
@@ -397,6 +401,10 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
 
     const fixPrompt = `Fix the following ${issues.length} errors found in this project:\n\n${issuesSummary}\n\nRules:\n- Fix each error\n- Do not introduce new errors\n- Install any missing dependencies with npm\n- Ensure npm run build passes after fixes\n\nRuntime Safety (apply to ALL fixes):\n- All array operations (.map, .filter, .reduce, .forEach, .find, .some, .every) MUST be guarded: use (value ?? []).map(...) or Array.isArray(value) checks\n- All Supabase query results MUST use \`data ?? []\` — Supabase returns null, not [] for empty results\n- All React useState hooks for arrays MUST be initialized with []: useState<Type[]>([])\n- All API/fetch response data MUST be validated before calling array methods: const items = Array.isArray(res?.data) ? res.data : []\n- Use optional chaining (?.) for nested object access from DB or API responses\n- Destructure with defaults: const { items = [], count = 0 } = response ?? {}`;
 
+    if (resolveModelForStep) {
+      effectiveModel = (await resolveModelForStep(effectiveModel)) ?? effectiveModel;
+    }
+
     let stepRowId: string | null = null;
     try {
       const { data: stepRow } = await supabase.from('build_steps').insert({
@@ -418,7 +426,7 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
       timeout: 300000,
       context: `Debug Agent cycle ${cycle}`,
       isFirstPrompt: false,
-      model,
+      model: effectiveModel,
       cursorApiKey,
       provider,
       supabaseClient: supabase,

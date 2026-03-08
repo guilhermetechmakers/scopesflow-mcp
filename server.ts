@@ -6099,14 +6099,16 @@ module.exports = {
     supabaseUrl: string,
     accessToken: string,
     anonKey: string,
-    supabaseServiceRoleKey?: string
+    supabaseServiceRoleKey?: string,
+    targetSupabaseUrl?: string,
+    targetSupabaseAnonKey?: string
   ): Promise<{ sessionPid?: number }> {
     this.stopRequests.delete(buildId);
     const shouldStop = () => this.stopRequests.has(buildId);
     const useWorkers = process.env.MCP_USE_BUILD_WORKERS === 'true';
 
     if (useWorkers) {
-      return this.runBuildWorker(buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey);
+      return this.runBuildWorker(buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, targetSupabaseUrl, targetSupabaseAnonKey);
     }
 
     // â”€â”€â”€â”€ Legacy in-process mode â”€â”€â”€â”€
@@ -6129,6 +6131,8 @@ module.exports = {
         accessToken,
         anonKey,
         supabaseServiceRoleKey,
+        targetSupabaseUrl,
+        targetSupabaseAnonKey,
         createProjectFn,
         executePromptFn,
         activeBuildTracker: this.activeBuildTracker,
@@ -6154,6 +6158,8 @@ module.exports = {
     accessToken: string,
     anonKey: string,
     supabaseServiceRoleKey?: string,
+    targetSupabaseUrl?: string,
+    targetSupabaseAnonKey?: string
   ): Promise<{ sessionPid?: number }> {
     // Concurrency check
     if (!this.buildOrchestrator.canStartBuild()) {
@@ -6178,8 +6184,11 @@ module.exports = {
     if (supabaseServiceRoleKey) {
       workerEnv['MCP_SUPABASE_SERVICE_ROLE_KEY'] = supabaseServiceRoleKey;
     }
-    if (feedbackSessionId) {
-      workerEnv['FEEDBACK_SESSION_ID'] = feedbackSessionId;
+    if (targetSupabaseUrl) {
+      workerEnv['TARGET_SUPABASE_URL'] = targetSupabaseUrl;
+    }
+    if (targetSupabaseAnonKey) {
+      workerEnv['TARGET_SUPABASE_ANON_KEY'] = targetSupabaseAnonKey;
     }
     if (process.env.MCP_BUILD_API_KEY) {
       workerEnv['MCP_BUILD_API_KEY'] = process.env.MCP_BUILD_API_KEY;
@@ -6721,8 +6730,10 @@ module.exports = {
               accessToken?: string;
               anonKey?: string;
               supabaseServiceRoleKey?: string;
+              targetSupabaseUrl?: string;
+              targetSupabaseAnonKey?: string;
             };
-            const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey } = payload;
+            const { buildId, supabaseUrl, accessToken, anonKey, supabaseServiceRoleKey, targetSupabaseUrl, targetSupabaseAnonKey } = payload;
             if (!buildId || !supabaseUrl || !accessToken || !anonKey) {
               const missing = [
                 !buildId && 'buildId',
@@ -6740,7 +6751,7 @@ module.exports = {
               return;
             }
             const serviceRoleKey = supabaseServiceRoleKey || process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
-            this.runBuild(buildId, supabaseUrl, accessToken, anonKey, serviceRoleKey || undefined)
+            this.runBuild(buildId, supabaseUrl, accessToken, anonKey, serviceRoleKey || undefined, targetSupabaseUrl, targetSupabaseAnonKey)
               .then((result) => {
                 res.writeHead(200, cors);
                 res.end(JSON.stringify({ started: true, buildId, sessionPid: result.sessionPid }));
@@ -6795,6 +6806,131 @@ module.exports = {
       }
 
       // â”€â”€â”€â”€ GET /api/builds/:id/agent-status â”€â”€â”€â”€
+      // GET /api/builds/:id/model
+      const modelGetMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/model\/?$/);
+      if (req.method === 'GET' && modelGetMatch) {
+        const targetBuildId = modelGetMatch[1];
+        const serviceKey = process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
+        const sbUrl = process.env.SUPABASE_URL?.trim();
+
+        if (!serviceKey || !sbUrl) {
+          res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify({ error: 'Server not configured with Supabase credentials' }));
+          return;
+        }
+
+        try {
+          const db = createClient(sbUrl, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
+
+          const { data, error } = await db
+            .from('automated_builds')
+            .select('configuration')
+            .eq('id', targetBuildId)
+            .single();
+
+          if (error || !data) {
+            res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: 'Build not found' }));
+            return;
+          }
+
+          const cfg = (data.configuration as Record<string, unknown>) ?? {};
+          const currentModel = typeof cfg.currentModel === 'string' ? cfg.currentModel : null;
+          const pendingModel = typeof cfg.pendingModel === 'string' ? cfg.pendingModel : null;
+          const configModel = typeof cfg.model === 'string' ? cfg.model : null;
+
+          const response = {
+            buildId: targetBuildId,
+            currentModel: currentModel ?? configModel ?? null,
+            pendingModel,
+          };
+
+          res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify(response));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+          res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+        }
+        return;
+      }
+
+      // POST /api/builds/:id/model
+      const modelPostMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/model\/?$/);
+      if (req.method === 'POST' && modelPostMatch) {
+        const targetBuildId = modelPostMatch[1];
+        let body = '';
+        req.on('data', (chunk: Buffer) => { body += chunk; });
+        req.on('end', async () => {
+          const serviceKey = process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
+          const sbUrl = process.env.SUPABASE_URL?.trim();
+
+          if (!serviceKey || !sbUrl) {
+            res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: 'Server not configured with Supabase credentials' }));
+            return;
+          }
+
+          try {
+            let payload: { model?: string };
+            try {
+              payload = body ? JSON.parse(body) : {};
+            } catch {
+              res.writeHead(400, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+              return;
+            }
+
+            const model = typeof payload.model === 'string' && payload.model.trim() ? payload.model.trim() : null;
+            if (!model) {
+              res.writeHead(400, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: 'model is required' }));
+              return;
+            }
+
+            const db = createClient(sbUrl, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
+
+            const { data: existing, error: fetchErr } = await db
+              .from('automated_builds')
+              .select('configuration')
+              .eq('id', targetBuildId)
+              .single();
+
+            if (fetchErr || !existing) {
+              res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: 'Build not found' }));
+              return;
+            }
+
+            const cfg = { ...((existing.configuration as Record<string, unknown>) ?? {}) };
+            cfg.pendingModel = model;
+
+            const { error: updateErr } = await db
+              .from('automated_builds')
+              .update({ configuration: cfg })
+              .eq('id', targetBuildId);
+
+            if (updateErr) {
+              res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+              res.end(JSON.stringify({ error: updateErr.message }));
+              return;
+            }
+
+            console.error(`[MCP Server] Build ${targetBuildId}: pendingModel set to "${model}" (will apply on next step)`);
+
+            res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({
+              buildId: targetBuildId,
+              pendingModel: model,
+              message: 'Model change queued for next step',
+            }));
+          } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json', ...cors });
+            res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'Internal error' }));
+          }
+        });
+        return;
+      }
+
       const agentStatusMatch = urlPath.match(/^\/api\/builds\/([^/]+)\/agent-status\/?$/);
       if (req.method === 'GET' && agentStatusMatch) {
         const targetBuildId = agentStatusMatch[1];
@@ -6814,10 +6950,11 @@ module.exports = {
             .from('automated_builds')
             .select(`
               id, current_agent_phase,
-              developer_completed_at, scope_check_completed_at, design_completed_at, debug_completed_at, feedback_completed_at,
+              developer_completed_at, scope_check_completed_at, design_completed_at, ui_design_improvements_completed_at, debug_completed_at, feedback_completed_at,
               developer_completion_pct,
               scope_check_pages_total, scope_check_pages_completed,
               design_issues_found, design_issues_fixed,
+              ui_design_improvements_issues_found, ui_design_improvements_issues_fixed,
               debug_issues_found, debug_issues_fixed,
               feedback_prompts_total, feedback_prompts_completed,
               agent_loop_count
@@ -6852,6 +6989,12 @@ module.exports = {
                 issuesFound: data.design_issues_found,
                 issuesFixed: data.design_issues_fixed,
                 completedAt: data.design_completed_at,
+              },
+              'ui-design-improvements': {
+                status: data.ui_design_improvements_completed_at ? 'completed' : data.current_agent_phase === 'ui-design-improvements' ? 'running' : 'pending',
+                issuesFound: data.ui_design_improvements_issues_found,
+                issuesFixed: data.ui_design_improvements_issues_fixed,
+                completedAt: data.ui_design_improvements_completed_at,
               },
               debug: {
                 status: data.debug_completed_at ? 'completed' : data.current_agent_phase === 'debug' ? 'running' : 'pending',
@@ -6995,6 +7138,7 @@ module.exports = {
           '/api/health',
           '/api/builds',
           '/api/builds/:id/agent-status',
+          '/api/builds/:id/model',
           '/api/builds/:id/preview',
           '/api/sessions',
           '/api/sessions/:id/stop',
@@ -7018,6 +7162,8 @@ module.exports = {
       console.error(`  GET    http://${host}:${port}/api/health`);
       console.error(`  GET    http://${host}:${port}/api/builds`);
       console.error(`  GET    http://${host}:${port}/api/builds/:id/agent-status`);
+      console.error(`  GET    http://${host}:${port}/api/builds/:id/model`);
+      console.error(`  POST   http://${host}:${port}/api/builds/:id/model`);
       console.error(`  POST   http://${host}:${port}/api/builds/:id/preview`);
       console.error(`  DELETE http://${host}:${port}/api/builds/:id/preview`);
       console.error(`  GET    http://${host}:${port}/api/sessions`);
