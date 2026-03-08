@@ -59,7 +59,7 @@ interface ExecutePromptArgs {
   supabaseClient?: SupabaseClient; // NEW: Optional Supabase client for fetching GitHub auth
   userId?: string;           // NEW: Optional user ID for fetching GitHub auth
   buildId?: string;          // NEW: When set, server appends to build_logs for realtime following
-  model?: string;            // NEW: Model to use for cursor-agent (defaults to "composer-1.5")
+  model?: string;            // NEW: Model to use for cursor-agent (defaults to "auto")
   cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
   promptId?: string;         // NEW: Flowchart prompt ID â€” included in mcp_log for correct marking on completion
   provider?: 'cursor' | 'claude-code'; // AI provider: cursor-agent or claude CLI
@@ -2585,7 +2585,7 @@ Analyze the existing project structure and implement the task following the patt
         
         // Use --print flag for non-interactive mode, --force to allow commands
         // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
-        const modelArg = args.model || 'composer-1.5';
+        const modelArg = args.model || 'auto';
         // Per-user key only (no server fallback)
         const effectiveKey = effectiveCursorApiKey || '';
         // Use export inside the bash -c string (single-quoted value) instead of --api-key "..." because
@@ -2597,7 +2597,7 @@ Analyze the existing project structure and implement the task following the patt
         const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
         await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
         
-        const modelArg = args.model || 'composer-1.5';
+        const modelArg = args.model || 'auto';
         command = `cat .cursor-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
       }
       
@@ -3841,7 +3841,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         const tempPromptFile = path.join(actualProjectPath, '.cursor-fix-prompt.tmp');
         await fs.writeFile(tempPromptFile, fixPrompt, 'utf-8');
 
-        const modelArg = model || 'composer-1.5';
+        const modelArg = model || 'auto';
         let command: string;
         if (isWindows) {
           const wslProjectPath = actualProjectPath
