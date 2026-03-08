@@ -2093,9 +2093,22 @@ When implementing this project:
           await this.ensureSupabaseMigrationStructure(actualProjectPath);
         }
       } catch (error) {
-        // No .env.local or no Supabase config - that's okay
+        // No .env.local or no Supabase config - check environment variables as fallback
       }
-      
+
+      // Fallback: detect Supabase from environment variables set by the build worker
+      if (!hasSupabase) {
+        const targetUrl = process.env.TARGET_SUPABASE_URL || process.env.SUPABASE_URL;
+        if (targetUrl) {
+          supabaseUrl = targetUrl;
+          hasSupabase = true;
+          console.log('[MCP Server] Detected Supabase configuration from environment variables');
+          try {
+            await this.ensureSupabaseMigrationStructure(actualProjectPath);
+          } catch { /* non-blocking */ }
+        }
+      }
+
       // Prepare Supabase instructions - simplified for first prompt, detailed for subsequent prompts
       let supabaseInstructions = '';
       
@@ -2126,15 +2139,19 @@ CRUD REQUIREMENTS (for each data entity in the requirements):
 3. Use React Query for caching, invalidation, optimistic updates
 4. Follow patterns in SUPABASE_API_EXAMPLES.md
 
-EDGE FUNCTIONS - CREATE when feature requires:
-- LLM/AI features (chat, completions, embeddings) â†’ create Edge Function, invoke via supabase.functions.invoke
-- Third-party APIs (Stripe, SendGrid, etc.) â†’ create Edge Function
-- Webhooks (incoming) â†’ create Edge Function
-- Heavy computation or server-only logic â†’ create Edge Function
-DO NOT use Edge for: CRUD, Auth, Realtime, Storage â€” use Supabase client directly.
+EDGE FUNCTIONS - MANDATORY CREATION RULES:
+If the task prompt mentions ANY of the following, you MUST create the Edge Function file immediately:
+- LLM/AI features (chat, completions, embeddings) → create supabase/functions/<function-name>/index.ts AND call via supabase.functions.invoke
+- Third-party APIs (Stripe, SendGrid, Twilio, etc.) → create Edge Function to keep API keys server-side
+- Webhooks (incoming) → create Edge Function
+- Background jobs, scheduled tasks, or server-only logic → create Edge Function
+DO NOT use Edge for: CRUD, Auth, Realtime, Storage — use Supabase client directly.
 Never expose LLM or third-party API keys in the client.
 
-Note: Database migrations will be handled in subsequent prompts when database features are needed.
+DATABASE MIGRATIONS - MANDATORY CREATION RULES:
+If the task prompt mentions creating any database table, schema, or data structure, you MUST create a migration file in supabase/migrations/<timestamp>_<description>.sql immediately. Do not skip this step.
+
+Note: Additional migrations will also be handled in subsequent prompts as features are added.
 
 `;
         } else {
@@ -2167,12 +2184,15 @@ CRUD REQUIREMENTS (for each data entity):
 3. Use React Query for caching, invalidation, optimistic updates
 4. Follow patterns in SUPABASE_API_EXAMPLES.md
 
-EDGE FUNCTIONS - CREATE when feature requires:
-- LLM/AI features (chat, completions, embeddings) â†’ create Edge Function, invoke via supabase.functions.invoke
-- Third-party APIs (Stripe, SendGrid, etc.) â†’ create Edge Function
-- Webhooks (incoming) â†’ create Edge Function
-- Heavy computation or server-only logic â†’ create Edge Function
-DO NOT use Edge for: CRUD, Auth, Realtime, Storage â€” use Supabase client directly.
+EDGE FUNCTIONS - MANDATORY CREATION RULES:
+If this task prompt mentions ANY of the following, you MUST create the Edge Function file NOW:
+- LLM/AI features (chat, completions, embeddings, vector search) → create supabase/functions/<function-name>/index.ts
+- Third-party APIs (Stripe, SendGrid, Twilio, OpenAI, Anthropic, etc.) → create Edge Function to keep keys server-side
+- Webhooks (incoming from external services) → create Edge Function
+- Background jobs, scheduled tasks, heavy computation, or logic requiring secrets → create Edge Function
+- Any prompt that says “create edge function” or “add edge function” → create it immediately
+Call Edge Functions from the client via: supabase.functions.invoke(‘<function-name>’, { body: { ... } })
+DO NOT use Edge for: CRUD, Auth, Realtime, Storage — use Supabase client directly.
 Never expose LLM or third-party API keys in the client.
 
 === DATABASE MIGRATION WORKFLOW (CRITICAL) ===
@@ -2365,10 +2385,16 @@ WHENEVER you create a feature requiring database tables, you MUST:
 
 Your job: Generate the files. Application's job: Execute them.
 
+MANDATORY CHECKLIST - Before finishing, verify you have created:
+- [ ] Migration SQL file(s) in supabase/migrations/ for every database table mentioned in the task
+- [ ] Edge Function file(s) in supabase/functions/<name>/index.ts for every server-side feature mentioned
+- [ ] TypeScript types for every new database table
+- [ ] API layer and React Query hooks for every new table
+
 `;
         }
       }
-      
+
       // Build directive prompt based on whether this is first prompt or subsequent
       let directivePrompt: string;
       
