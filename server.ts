@@ -4253,7 +4253,10 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     const promptFile = path.join(actualProjectPath, '.claude-prompt.tmp');
     await fs.writeFile(promptFile, prompt, 'utf-8');
 
-    const modelArg = model || 'opus';
+    // Map model to a valid Claude CLI model. 'auto' is a Cursor-specific value
+    // and not recognized by the Claude CLI, so default to 'opus'.
+    const INVALID_CLAUDE_MODELS = new Set(['auto', 'composer-1.5', 'gpt-5', 'grok', 'gemini-3-pro']);
+    const modelArg = (model && !INVALID_CLAUDE_MODELS.has(model)) ? model : 'opus';
     const allowedTools = 'Bash,Read,Edit,Write,MultiEdit,Glob,Grep';
     let command: string;
 
