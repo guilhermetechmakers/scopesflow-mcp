@@ -9,6 +9,7 @@ interface ScopeCheckAgentOptions {
   executePromptFn: ExecutePromptFn;
   model?: string;
   cursorApiKey?: string;
+  claudeApiKey?: string;
   provider?: BuildProvider;
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
@@ -29,7 +30,7 @@ interface GeneratePagePromptResponse {
 export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
-    executePromptFn, model, cursorApiKey, provider, githubAuth, userId, shouldStop,
+    executePromptFn, model, cursorApiKey, claudeApiKey, provider, githubAuth, userId, shouldStop,
     resolveModelForStep,
   } = options;
 
@@ -157,6 +158,7 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
       isFirstPrompt: false,
       model: effectiveModel,
       cursorApiKey,
+      claudeApiKey,
       provider,
       supabaseClient: supabase,
       userId,

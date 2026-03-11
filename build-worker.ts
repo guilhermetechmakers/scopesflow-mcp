@@ -160,7 +160,7 @@ async function main() {
 
   /** Call dispatcher's /api/execute-prompt. */
   const executePromptFn = async (args: BuildExecutePromptArgs): Promise<unknown> => {
-    console.log(`[BuildWorker] execute-prompt: buildId=${args.buildId ?? 'unknown'}, hasCursorApiKey=${!!args.cursorApiKey}`);
+    console.log(`[BuildWorker] execute-prompt: buildId=${args.buildId ?? 'unknown'}, hasCursorApiKey=${!!args.cursorApiKey}, hasClaudeApiKey=${!!args.claudeApiKey}`);
     const res = await fetch(`${DISPATCHER_URL}/api/execute-prompt`, {
       method: 'POST',
       headers,
@@ -181,6 +181,7 @@ async function main() {
         buildId: args.buildId,
         model: args.model,
         cursorApiKey: args.cursorApiKey,
+        claudeApiKey: args.claudeApiKey,
         supabaseUrl: SUPABASE_URL,
         anonKey: SUPABASE_ANON_KEY,
         accessToken: SUPABASE_ACCESS_TOKEN,

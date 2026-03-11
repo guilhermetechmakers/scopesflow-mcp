@@ -63,6 +63,7 @@ interface ExecutePromptArgs {
   cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
   promptId?: string;         // NEW: Flowchart prompt ID â€” included in mcp_log for correct marking on completion
   provider?: 'cursor' | 'claude-code'; // AI provider: cursor-agent or claude CLI
+  claudeApiKey?: string;     // NEW: Per-user Anthropic API key (passed to claude CLI via ANTHROPIC_API_KEY env var)
 }
 interface ProjectPathArgs {
   projectPath: string;
@@ -2667,11 +2668,12 @@ Analyze the existing project structure and implement the task following the patt
             args.timeout || 300000,
             onBuildLog,
             args.model,
+            args.claudeApiKey,
           );
           stdout = result.stdout;
           stderr = result.stderr;
           cursorAgentLogs = result.logs;
-          console.log(`[MCP Server] ðŸ“Š Captured ${cursorAgentLogs.length} log entries from Claude Code`);
+          console.log(`[MCP Server] ðŸ”Š Captured ${cursorAgentLogs.length} log entries from Claude Code`);
         } else {
           const result = await this.executeCursorAgentStreaming(
             command,
@@ -2784,7 +2786,7 @@ Analyze the existing project structure and implement the task following the patt
           console.log(`[MCP Server] ${validationResult.summary}`);
           console.log(`[MCP Server] Error count: ${validationResult.errors.length}`);
           
-          const fixResult = await this.autoFixBuildErrors(actualProjectPath, validationResult, 0, args.model, args.provider, effectiveCursorApiKey);
+          const fixResult = await this.autoFixBuildErrors(actualProjectPath, validationResult, 0, args.model, args.provider, effectiveCursorApiKey, args.claudeApiKey);
           
           if (fixResult.success) {
             await appendBuildLog('Build validation auto-fix completed');
@@ -3783,6 +3785,7 @@ This task was created by ScopesFlow automation. To complete:
     model?: string,
     provider?: 'cursor' | 'claude-code',
     cursorApiKey?: string,
+    claudeApiKey?: string,
   ): Promise<{ success: boolean; message: string }> {
     console.log(`[MCP Server] ðŸ”§ Auto-fixing build errors (attempt ${retryCount + 1}/${this.MAX_BUILD_FIX_RETRIES})...`);
     
@@ -3867,6 +3870,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
           300000,
           undefined,
           model,
+          claudeApiKey,
         );
       } else {
         const tempPromptFile = path.join(actualProjectPath, '.cursor-fix-prompt.tmp');
@@ -3922,13 +3926,13 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         console.log(`[MCP Server] âš ï¸ Build still has errors after fix attempt`);
         
         // Retry with incremented count
-        return await this.autoFixBuildErrors(actualProjectPath, validationResult, retryCount + 1, model, provider, cursorApiKey);
+        return await this.autoFixBuildErrors(actualProjectPath, validationResult, retryCount + 1, model, provider, cursorApiKey, claudeApiKey);
       }
     } catch (error: any) {
       console.error(`[MCP Server] âŒ Auto-fix attempt ${retryCount + 1} failed:`, error.message);
       
       // Retry
-      return await this.autoFixBuildErrors(projectPath, errorDetails, retryCount + 1, model, provider, cursorApiKey);
+      return await this.autoFixBuildErrors(projectPath, errorDetails, retryCount + 1, model, provider, cursorApiKey, claudeApiKey);
     }
   }
 
@@ -4238,6 +4242,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     timeout: number,
     onBuildLog?: (message: string, level?: 'info' | 'error') => void | Promise<void>,
     model?: string,
+    claudeApiKey?: string,
   ): Promise<{ stdout: string; stderr: string; logs: Array<{ timestamp: string; type: string; message: string; data?: any }> }> {
     const isWindows = process.platform === 'win32';
     let actualProjectPath = projectPath;
@@ -4297,14 +4302,27 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         }
       };
 
+      const effectiveClaudeApiKey = typeof claudeApiKey === 'string' ? claudeApiKey.trim() : '';
+      if (effectiveClaudeApiKey) {
+        console.log('[MCP Server] Using user-provided Anthropic API key for Claude Code');
+        addLog('info', 'Using user-provided Anthropic API key');
+      } else {
+        console.log('[MCP Server] Using server default Anthropic auth for Claude Code');
+        addLog('info', 'Using server default Anthropic auth');
+      }
+
       console.log('[MCP Server] Starting Claude Code with streaming output...');
       addLog('info', 'Starting Claude Code with streaming output');
+
+      const spawnEnv = effectiveClaudeApiKey
+        ? { ...process.env, ANTHROPIC_API_KEY: effectiveClaudeApiKey }
+        : process.env;
 
       const childProcess = spawn(command, [], {
         cwd: isWindows ? undefined : actualProjectPath,
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: process.env,
+        env: spawnEnv,
       });
 
       const timeoutHandle = setTimeout(() => {
@@ -6587,9 +6605,9 @@ module.exports = {
             const data = JSON.parse(body || '{}') as {
               buildId?: string; projectId?: string; promptId?: string; promptContent?: string; prompt?: string; projectPath?: string;
               timeout?: number; context?: string; supabaseUrl?: string; anonKey?: string; accessToken?: string; serviceRoleKey?: string;
-              provider?: 'cursor' | 'claude-code'; model?: string; cursorApiKey?: string; userId?: string;
+              provider?: 'cursor' | 'claude-code'; model?: string; cursorApiKey?: string; claudeApiKey?: string; userId?: string;
             };
-            const { buildId, projectId, promptId, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey, provider, model, cursorApiKey, userId: payloadUserId } = data;
+            const { buildId, projectId, promptId, projectPath, timeout, context, supabaseUrl, anonKey, accessToken, serviceRoleKey, provider, model, cursorApiKey, claudeApiKey, userId: payloadUserId } = data;
             // Accept both field names: promptContent (build-phase callers) and prompt (build-worker)
             const promptContent = data.promptContent ?? data.prompt;
             
@@ -6659,7 +6677,7 @@ module.exports = {
               try {
                 console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - Calling executePrompt...');
                 const execRes = await this.executePrompt(this.validateExecutePromptArgs({
-                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: resolvedUserId, promptId, provider, model, cursorApiKey,
+                  prompt: promptContent, projectPath, timeout, context, buildId, supabaseClient: supabase, userId: resolvedUserId, promptId, provider, model, cursorApiKey, claudeApiKey,
                 }));
                 
                 console.log('[MCP Server] ðŸ” DEBUG: HTTP handler - executePrompt returned, parsing result...');

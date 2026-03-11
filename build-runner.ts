@@ -56,8 +56,10 @@ export interface BuildExecutePromptArgs {
   /** Per-user Cursor API key (passed to cursor-agent via CURSOR_API_KEY env var). */
   cursorApiKey?: string;
   promptId?: string;
-  /** AI provider: 'cursor' uses cursor-agent + user key, 'claude-code' uses pre-authenticated claude CLI. */
+  /** AI provider: 'cursor' uses cursor-agent + user key, 'claude-code' uses claude CLI with user API key. */
   provider?: BuildProvider;
+  /** Per-user Anthropic API key (passed to claude CLI via ANTHROPIC_API_KEY env var). */
+  claudeApiKey?: string;
 }
 
 export type CreateProjectFn = (config: BuildCursorConfig) => Promise<unknown>;
@@ -104,6 +106,8 @@ export interface RunBuildLoopOptions {
   activeBuildTracker?: Map<string, ActiveBuildEntry>;
   /** Per-user Cursor API key (only used when provider === 'cursor'). */
   cursorApiKey?: string;
+  /** Per-user Anthropic API key (only used when provider === 'claude-code'). */
+  claudeApiKey?: string;
   /** AI provider for this build. */
   provider?: BuildProvider;
   shouldStop?: () => boolean;
@@ -174,7 +178,7 @@ export async function runBuildLoop(
   buildId: string,
   options: RunBuildLoopOptions
 ): Promise<void> {
-  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker, cursorApiKey, provider, shouldStop, feedbackSessionId: optionsFeedbackSessionId } = options;
+  const { createProjectFn, executePromptFn, githubAuth, configOverrides, activeBuildTracker, cursorApiKey, claudeApiKey, provider, shouldStop, feedbackSessionId: optionsFeedbackSessionId } = options;
 
   const log = (message: string, level: 'info' | 'error' = 'info') => {
     console.error(`[BuildRunner] ${message}`);
@@ -197,6 +201,7 @@ export async function runBuildLoop(
     'anonKey',
     'gitHubToken',
     'cursorApiKey',
+    'claudeApiKey',
   ]);
 
   const sanitizeRecord = (input: unknown): unknown => {
@@ -816,6 +821,7 @@ export async function runBuildLoop(
           buildId,
           model,
           cursorApiKey,
+          claudeApiKey,
           provider,
           promptId: promptItem.id,
         };
@@ -1052,6 +1058,7 @@ export async function runBuildLoop(
           buildId,
           model,
           cursorApiKey,
+          claudeApiKey,
           provider,
           promptId: phaseResult.nextPrompt.id,
         };
@@ -1132,6 +1139,7 @@ export async function runBuildLoop(
       executePromptFn,
       model,
       cursorApiKey,
+      claudeApiKey,
       provider,
       githubAuth,
       userId: row.user_id,
@@ -1266,6 +1274,7 @@ export async function runBuildLoop(
             buildId,
             model,
             cursorApiKey,
+            claudeApiKey,
             provider,
             promptId: promptItem.id,
           };
@@ -1527,6 +1536,77 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
     console.log('[BuildRunner] ℹ️ Claude Code provider selected — skipping Cursor API key fetch');
   }
 
+  // ──── Fetch Claude API key once per build (only for claude-code provider) ────
+  let claudeApiKey: string | undefined;
+  let claudeApiKeyError: string | undefined;
+  if (buildProvider === 'claude-code') {
+    try {
+      const dbClient = supabaseServiceRoleKey
+        ? createClient(supabaseUrl, supabaseServiceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
+        : supabaseUser;
+      console.log(`[BuildRunner] 🔍 Fetching Claude API key for user_id: ${user.id}`);
+      const { data: keyRow, error: keyError } = await dbClient
+        .from('claude_api_keys')
+        .select('api_key_ciphertext, revoked_at')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (keyError) {
+        console.warn(`[BuildRunner] ⚠️ Error fetching Claude API key: ${keyError.message}`);
+        claudeApiKeyError = 'Failed to fetch your Claude API key. Please try again.';
+      } else if (keyRow && typeof keyRow === 'object') {
+        const row = keyRow as { api_key_ciphertext?: string; revoked_at?: string | null };
+        if (row.revoked_at) {
+          console.warn('[BuildRunner] ⚠️ Claude API key has been revoked');
+          claudeApiKeyError = 'Your Claude API key was revoked. Please add a new key in Settings.';
+        } else if (row.api_key_ciphertext) {
+          try {
+            claudeApiKey = decryptCursorApiKey(row.api_key_ciphertext);
+            console.log('[BuildRunner] ✅ Claude API key decrypted successfully — user credits will be used');
+          } catch (decryptErr) {
+            console.warn(
+              '[BuildRunner] ⚠️ Failed to decrypt Claude API key:',
+              decryptErr instanceof Error ? decryptErr.message : 'unknown error'
+            );
+            claudeApiKeyError =
+              'Failed to decrypt your Claude API key. Ensure CURSOR_KEYS_ENCRYPTION_SECRET is set on the MCP server and matches the Supabase Edge Functions secret.';
+          }
+          try {
+            await dbClient.from('claude_api_keys').update({ last_used_at: new Date().toISOString() }).eq('user_id', user.id);
+          } catch { /* non-blocking */ }
+        } else {
+          console.warn('[BuildRunner] ⚠️ Claude API key row found but api_key_ciphertext is empty');
+          claudeApiKeyError = 'Your Claude API key appears empty. Please re-save your key in Settings.';
+        }
+      } else {
+        console.warn(`[BuildRunner] ⚠️ No Claude API key found for user_id: ${user.id}`);
+        claudeApiKeyError = 'Claude API key not configured. Please add your key in Settings.';
+      }
+    } catch (error) {
+      console.warn('[BuildRunner] ⚠️ Exception fetching Claude API key:', error instanceof Error ? error.message : 'Unknown error');
+      claudeApiKeyError = 'Failed to fetch your Claude API key. Please try again.';
+    }
+
+    if (!claudeApiKey) {
+      const userMessage =
+        claudeApiKeyError ?? 'Claude API key not configured for this user. Please add your Anthropic API key in Settings.';
+      console.error(`[BuildRunner] ${userMessage}`);
+      try {
+        await supabaseForBuild
+          .from('automated_builds')
+          .update({ status: 'failed', updated_at: new Date().toISOString() })
+          .eq('id', buildId);
+        await supabaseForBuild.from('build_logs').insert({
+          build_id: buildId,
+          log_type: 'build_log',
+          message: userMessage,
+          created_at: new Date().toISOString(),
+        });
+      } catch { /* non-blocking */ }
+      return;
+    }
+  }
+
   if (buildProvider === 'cursor') {
     const hasCursorApiKey = !!cursorApiKey;
     console.log(`[BuildRunner] Cursor API key ${hasCursorApiKey ? 'present' : 'missing'} before runBuildLoop (buildId=${buildId})`);
@@ -1549,6 +1629,7 @@ export async function runBuildFromPayload(options: RunBuildFromPayloadOptions): 
     configOverrides,
     activeBuildTracker,
     cursorApiKey,
+    claudeApiKey,
     provider: buildProvider,
     shouldStop,
     feedbackSessionId,

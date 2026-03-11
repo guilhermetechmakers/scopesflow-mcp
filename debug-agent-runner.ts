@@ -35,6 +35,7 @@ interface DebugAgentOptions {
   executePromptFn: ExecutePromptFn;
   model?: string;
   cursorApiKey?: string;
+  claudeApiKey?: string;
   provider?: BuildProvider;
   githubAuth?: { gitHubToken?: string; gitUserName?: string; gitUserEmail?: string };
   userId: string;
@@ -227,7 +228,7 @@ async function runRuntimeSmokeTest(
 export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
   const {
     supabase, buildId, projectId, projectPath,
-    executePromptFn, model, cursorApiKey, provider, githubAuth, userId, shouldStop,
+    executePromptFn, model, cursorApiKey, claudeApiKey, provider, githubAuth, userId, shouldStop,
     resolveModelForStep,
   } = options;
 
@@ -428,6 +429,7 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
       isFirstPrompt: false,
       model: effectiveModel,
       cursorApiKey,
+      claudeApiKey,
       provider,
       supabaseClient: supabase,
       userId,
