@@ -6853,11 +6853,13 @@ module.exports = {
       // â”€â”€â”€â”€ GET /api/builds â”€â”€â”€â”€
       if (req.method === 'GET' && (urlPath === '/api/builds' || urlPath === '/api/builds/')) {
         const builds = Array.from(this.activeBuildTracker.values());
+        const parsedMax = parseInt(process.env.MCP_MAX_CONCURRENT_BUILDS || '5', 10);
+        const maxConcurrent = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 5;
         res.writeHead(200, { 'Content-Type': 'application/json', ...cors });
         res.end(JSON.stringify({
           activeBuilds: builds,
-          maxConcurrent: 5,
-          available: Math.max(0, 5 - builds.length),
+          maxConcurrent,
+          available: Math.max(0, maxConcurrent - builds.length),
         }));
         return;
       }
@@ -7438,6 +7440,5 @@ if (mode === 'cursor') {
   console.error('Starting MCP server in WebSocket mode...');
   server.runWebSocket().catch(console.error);
 }
-
 
 

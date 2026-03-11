@@ -23,11 +23,20 @@ export class BuildOrchestrator {
   private activeBuilds = new Map<string, { buildId: string; pid?: number; port?: number }>();
   private workerSessions = new Map<string, WorkerSession>();
   private maxConcurrentBuilds: number;
-  private portRange = { start: 3100, end: 3200 };
+  private portRange: { start: number; end: number };
   private usedPorts = new Set<number>();
 
   constructor(maxConcurrent?: number) {
-    this.maxConcurrentBuilds = maxConcurrent ?? parseInt(process.env.MCP_MAX_CONCURRENT_BUILDS || '5', 10);
+    const parsedMax = parseInt(process.env.MCP_MAX_CONCURRENT_BUILDS || '5', 10);
+    this.maxConcurrentBuilds = maxConcurrent ?? (Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 5);
+
+    const parsedStart = parseInt(process.env.MCP_PREVIEW_PORT_START || '3100', 10);
+    const parsedEnd = parseInt(process.env.MCP_PREVIEW_PORT_END || '3200', 10);
+    if (Number.isFinite(parsedStart) && Number.isFinite(parsedEnd) && parsedStart > 0 && parsedEnd >= parsedStart) {
+      this.portRange = { start: parsedStart, end: parsedEnd };
+    } else {
+      this.portRange = { start: 3100, end: 3200 };
+    }
   }
 
   // ──── Build slot management ────
