@@ -1357,7 +1357,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
   }
 
   private validateExecutePromptArgs(args: Record<string, unknown>): ExecutePromptArgs {
-    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId, promptId, model, cursorApiKey, provider } = args;
+    const { prompt, projectPath, timeout, context, files, gitHubToken, gitUserName, gitUserEmail, gitRepository, isFirstPrompt, retryCount, isRetry, supabaseClient, userId, buildId, promptId, model, cursorApiKey, claudeApiKey, provider } = args;
 
     if (typeof prompt !== 'string') throw new Error('Prompt must be a string');
     if (typeof projectPath !== 'string') throw new Error('Project path must be a string');
@@ -1381,6 +1381,7 @@ See DESIGN_RULES.md in the server root for complete guidelines.
       promptId: typeof promptId === 'string' ? promptId : undefined,
       model: typeof model === 'string' ? model : undefined,
       cursorApiKey: typeof cursorApiKey === 'string' ? cursorApiKey : undefined,
+      claudeApiKey: typeof claudeApiKey === 'string' ? claudeApiKey : undefined,
       provider: provider === 'claude-code' ? 'claude-code' : provider === 'cursor' ? 'cursor' : undefined,
     };
   }
@@ -6618,7 +6619,7 @@ module.exports = {
             console.log('[MCP Server] ðŸ” DEBUG: Parsed request - hasPromptContent=', !!promptContent, 'promptLength=', promptContent?.length || 0);
             console.log('[MCP Server] ðŸ” DEBUG: Parsed request - hasSupabaseUrl=', !!supabaseUrl, 'hasServiceRoleKey=', !!serviceRoleKey, 'hasAnonKey=', !!anonKey, 'hasAccessToken=', !!accessToken);
             console.log('[MCP Server] ðŸ” DEBUG: Parsed request - provider=', provider || 'cursor (default)');
-            console.log('[MCP Server] ðŸ” DEBUG: Parsed request - hasCursorApiKey=', !!cursorApiKey);
+            console.log('[MCP Server] ðŸ” DEBUG: Parsed request - hasCursorApiKey=', !!cursorApiKey, 'hasClaudeApiKey=', !!claudeApiKey);
             const hasServiceRole = !!serviceRoleKey;
             const hasUserAuth = !!anonKey && !!accessToken;
             if (!buildId || !projectId || !promptContent || !projectPath || !supabaseUrl || (!hasServiceRole && !hasUserAuth)) {
