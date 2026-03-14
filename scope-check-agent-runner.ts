@@ -169,7 +169,7 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
     if (githubAuth?.gitUserName) args.gitUserName = githubAuth.gitUserName;
     if (githubAuth?.gitUserEmail) args.gitUserEmail = githubAuth.gitUserEmail;
 
-    const result = await withTimeout(executePromptFn(args), 360_000, 'scope-check');
+    const result = await withTimeout(executePromptFn(args), 780_000, 'scope-check');
 
     if (result) {
       await supabase.from('flowchart_items')

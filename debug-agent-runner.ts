@@ -439,7 +439,7 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
     if (githubAuth?.gitUserName) args.gitUserName = githubAuth.gitUserName;
     if (githubAuth?.gitUserEmail) args.gitUserEmail = githubAuth.gitUserEmail;
 
-    await withTimeout(executePromptFn(args), 360_000, 'debug fix');
+    await withTimeout(executePromptFn(args), 780_000, 'debug fix');
 
     if (stopIfRequested('post-fix')) return;
 

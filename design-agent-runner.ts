@@ -241,7 +241,7 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
       if (githubAuth?.gitUserName) args.gitUserName = githubAuth.gitUserName;
       if (githubAuth?.gitUserEmail) args.gitUserEmail = githubAuth.gitUserEmail;
 
-      const result = await withTimeout(executePromptFn(args), 360_000, 'design fix');
+      const result = await withTimeout(executePromptFn(args), 780_000, 'design fix');
 
       if (result) {
         await supabase.from('design_audit_results')

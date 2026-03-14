@@ -82,8 +82,9 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
   });
 }
 
-/** Buffer added on top of the step timeout so the MCP server's internal timeout fires first. */
-const RUNNER_TIMEOUT_BUFFER_MS = 60_000;
+/** Buffer added on top of the step timeout so the MCP server's internal timeout fires first.
+ *  Must be large enough to cover post-processing (build validation ~40s, git commit ~10s, etc.). */
+const RUNNER_TIMEOUT_BUFFER_MS = 180_000;
 
 /** Parsed result from executePromptFn (extracted from MCP content[0].text). */
 export interface ExecutePromptResult {
@@ -719,7 +720,7 @@ export async function runBuildLoop(
 
     // Timeout per step from automationSettings or default 5 min
     const timeoutPerStep =
-      ((configuration as { automationSettings?: { timeoutPerStep?: number } }).automationSettings?.timeoutPerStep) ?? 300000;
+      ((configuration as { automationSettings?: { timeoutPerStep?: number } }).automationSettings?.timeoutPerStep) ?? 600000;
 
     if (activeBuildTracker && !activeBuildTracker.has(buildId)) {
       activeBuildTracker.set(buildId, {

@@ -59,7 +59,7 @@ interface ExecutePromptArgs {
   supabaseClient?: SupabaseClient; // NEW: Optional Supabase client for fetching GitHub auth
   userId?: string;           // NEW: Optional user ID for fetching GitHub auth
   buildId?: string;          // NEW: When set, server appends to build_logs for realtime following
-  model?: string;            // NEW: Model to use for cursor-agent (defaults to "composer-1.5")
+  model?: string;            // NEW: Model to use for cursor-agent (defaults to "auto")
   cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
   promptId?: string;         // NEW: Flowchart prompt ID â€” included in mcp_log for correct marking on completion
   provider?: 'cursor' | 'claude-code'; // AI provider: cursor-agent or claude CLI
@@ -1914,7 +1914,7 @@ When implementing this project:
       console.log(`[MCP Server] Executing prompt via ${cliLabel}`);
       console.log(`[MCP Server] Project: ${args.projectPath}`);
       console.log(`[MCP Server] Prompt preview: ${args.prompt.substring(0, 200)}...`);
-      console.log(`[MCP Server] Timeout: ${args.timeout || 300000}ms`);
+      console.log(`[MCP Server] Timeout: ${args.timeout || 600000}ms`);
       console.log(`[MCP Server] Retry count: ${args.retryCount || 0}`);
       console.log(`[MCP Server] Is retry: ${args.isRetry || false}`);
       console.log(`[MCP Server] ========================================`);
@@ -2666,7 +2666,7 @@ Analyze the existing project structure and implement the task following the patt
           const result = await this.executeClaudeCodeStreaming(
             directivePrompt,
             actualProjectPath,
-            args.timeout || 300000,
+            args.timeout || 600000,
             onBuildLog,
             args.model,
             args.claudeApiKey,
@@ -2679,7 +2679,7 @@ Analyze the existing project structure and implement the task following the patt
           const result = await this.executeCursorAgentStreaming(
             command,
             isWindows ? undefined : actualProjectPath,
-            args.timeout || 300000,
+            args.timeout || 600000,
             onBuildLog,
             effectiveCursorApiKey,
           );
@@ -3414,7 +3414,7 @@ This task was created by ScopesFlow automation. To complete:
           // Create retry args with longer timeout
           const retryArgs: ExecutePromptArgs = {
             ...args,
-            timeout: (args.timeout || 300000) * 2, // Double the timeout
+            timeout: (args.timeout || 600000) * 2, // Double the timeout
             retryCount: retryCount + 1,
             isRetry: true,
             prompt: `CONTINUE FROM PARTIAL STATE: ${args.prompt}\n\nNote: Previous attempt timed out but partial work was completed. Continue from where it left off. Files already modified: ${partialWork.validFiles.join(', ')}`
@@ -3437,7 +3437,7 @@ This task was created by ScopesFlow automation. To complete:
           // Create retry args with longer timeout
           const retryArgs: ExecutePromptArgs = {
             ...args,
-            timeout: (args.timeout || 300000) * 2, // Double the timeout
+            timeout: (args.timeout || 600000) * 2, // Double the timeout
             retryCount: retryCount + 1,
             isRetry: true,
             prompt: `RETRY AFTER TIMEOUT: ${args.prompt}\n\nNote: Previous attempt timed out with no progress. Retrying with longer timeout.`
@@ -3949,7 +3949,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     onBuildLog?: (message: string, level?: 'info' | 'error') => void | Promise<void>,
     cursorApiKey?: string,
   ): Promise<{ stdout: string; stderr: string; logs: Array<{ timestamp: string; type: string; message: string; data?: any }> }> {
-    const INACTIVITY_TIMEOUT_MS = 90_000; // 90s of no output = stalled
+    const INACTIVITY_TIMEOUT_MS = 300_000; // 5 min of no output = stalled (cursor-agent has long silent coding phases)
 
     return new Promise((resolve, reject) => {
       let stdout = '';
@@ -4287,7 +4287,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       command = `cd '${actualProjectPath}' && claude -p "$(cat .claude-prompt.tmp)" --output-format stream-json --verbose --max-turns 25 --model ${modelArg} --allowedTools '${allowedTools}'`;
     }
 
-    const INACTIVITY_TIMEOUT_MS = 90_000; // 90s of no output = stalled
+    const INACTIVITY_TIMEOUT_MS = 300_000; // 5 min of no output = stalled (agents have long silent coding phases)
 
     return new Promise((resolve, reject) => {
       let stdout = '';
