@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { SupabaseClient } from '@supabase/supabase-js';
-import type { ExecutePromptFn, BuildExecutePromptArgs, BuildProvider } from './build-runner.js';
+import { withTimeout, type ExecutePromptFn, type BuildExecutePromptArgs, type BuildProvider } from './build-runner.js';
 
 const MAX_FILES_TO_AUDIT = 100;
 const MAX_DESIGN_FIX_PROMPTS = 30;
@@ -241,7 +241,7 @@ export async function runDesignAgent(options: DesignAgentOptions): Promise<void>
       if (githubAuth?.gitUserName) args.gitUserName = githubAuth.gitUserName;
       if (githubAuth?.gitUserEmail) args.gitUserEmail = githubAuth.gitUserEmail;
 
-      const result = await executePromptFn(args);
+      const result = await withTimeout(executePromptFn(args), 360_000, 'design fix');
 
       if (result) {
         await supabase.from('design_audit_results')

@@ -6,6 +6,7 @@
  */
 
 import { ChildProcess } from 'child_process';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 /** Metadata for a running worker session. */
 export interface WorkerSession {
@@ -158,5 +159,48 @@ export class BuildOrchestrator {
       }
     }
     return reaped;
+  }
+
+  /**
+   * Start periodic liveness monitoring.
+   * Checks each active worker's heartbeat in the database. If a running build
+   * hasn't heartbeated in > STALL_THRESHOLD_MS, the worker is force-killed and
+   * the build marked as failed.
+   */
+  startLivenessMonitor(supabase: SupabaseClient, intervalMs = 60_000): NodeJS.Timeout {
+    const STALL_THRESHOLD_MS = 180_000; // 3 minutes
+
+    return setInterval(async () => {
+      // Also reap already-dead processes
+      this.reapDeadWorkers();
+
+      for (const [buildId, session] of this.workerSessions) {
+        try {
+          const { data } = await supabase
+            .from('automated_builds')
+            .select('last_heartbeat, status')
+            .eq('id', buildId)
+            .single();
+
+          if (data?.status === 'running' && data.last_heartbeat) {
+            const age = Date.now() - new Date(data.last_heartbeat).getTime();
+            if (age > STALL_THRESHOLD_MS) {
+              console.error(
+                `[Orchestrator] Worker ${buildId} (pid ${session.pid}) stalled ` +
+                `(heartbeat ${Math.round(age / 1000)}s ago). Killing.`
+              );
+              await this.stopWorker(buildId);
+              await supabase.from('automated_builds').update({
+                status: 'failed',
+                error_message: `Build stalled — no heartbeat for ${Math.round(age / 1000)}s. Automatically terminated.`,
+                completed_at: new Date().toISOString(),
+              }).eq('id', buildId);
+            }
+          }
+        } catch {
+          // Non-blocking — continue checking other workers
+        }
+      }
+    }, intervalMs);
   }
 }

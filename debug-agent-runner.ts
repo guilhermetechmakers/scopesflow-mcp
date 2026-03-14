@@ -2,7 +2,7 @@ import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as http from 'http';
 import { SupabaseClient } from '@supabase/supabase-js';
-import type { ExecutePromptFn, BuildExecutePromptArgs, BuildProvider } from './build-runner.js';
+import { withTimeout, type ExecutePromptFn, type BuildExecutePromptArgs, type BuildProvider } from './build-runner.js';
 
 const execAsync = promisify(exec);
 
@@ -439,7 +439,7 @@ export async function runDebugAgent(options: DebugAgentOptions): Promise<void> {
     if (githubAuth?.gitUserName) args.gitUserName = githubAuth.gitUserName;
     if (githubAuth?.gitUserEmail) args.gitUserEmail = githubAuth.gitUserEmail;
 
-    await executePromptFn(args);
+    await withTimeout(executePromptFn(args), 360_000, 'debug fix');
 
     if (stopIfRequested('post-fix')) return;
 

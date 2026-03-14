@@ -1,5 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js';
-import type { ExecutePromptFn, BuildExecutePromptArgs, BuildProvider } from './build-runner.js';
+import { withTimeout, type ExecutePromptFn, type BuildExecutePromptArgs, type BuildProvider } from './build-runner.js';
 
 interface ScopeCheckAgentOptions {
   supabase: SupabaseClient;
@@ -169,7 +169,7 @@ export async function runScopeCheckAgent(options: ScopeCheckAgentOptions): Promi
     if (githubAuth?.gitUserName) args.gitUserName = githubAuth.gitUserName;
     if (githubAuth?.gitUserEmail) args.gitUserEmail = githubAuth.gitUserEmail;
 
-    const result = await executePromptFn(args);
+    const result = await withTimeout(executePromptFn(args), 360_000, 'scope-check');
 
     if (result) {
       await supabase.from('flowchart_items')

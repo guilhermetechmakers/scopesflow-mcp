@@ -2618,7 +2618,7 @@ Analyze the existing project structure and implement the task following the patt
         
         // Use --print flag for non-interactive mode, --force to allow commands
         // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
-        const modelArg = args.model || 'composer-1.5';
+        const modelArg = args.model || 'auto';
         // Per-user key only (no server fallback)
         const effectiveKey = effectiveCursorApiKey || '';
         // Use export inside the bash -c string (single-quoted value) instead of --api-key "..." because
@@ -2630,7 +2630,7 @@ Analyze the existing project structure and implement the task following the patt
         const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
         await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
         
-        const modelArg = args.model || 'composer-1.5';
+        const modelArg = args.model || 'auto';
         command = `cat .cursor-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
       }
       
@@ -2748,12 +2748,12 @@ Analyze the existing project structure and implement the task following the patt
       }
       console.log(`[MCP Server] ========================================`);
 
-      if (args.provider === 'claude-code' && stdout.length === 0 && filesChanged.length === 0) {
+      if (stdout.length === 0 && filesChanged.length === 0) {
         const hasSuccessResult = cursorAgentLogs.some(
-          (l) => l.type === 'agent_completion' && l.message.includes('success')
+          (l) => l.type === 'agent_completion' && l.message.toLowerCase().includes('success')
         );
         if (!hasSuccessResult) {
-          const failMsg = 'Claude Code produced zero output and changed zero files â€” treating as failed execution.';
+          const failMsg = `${providerName} produced zero output and changed zero files â€” treating as failed execution.`;
           console.error(`[MCP Server] âŒ ${failMsg}`);
           await appendBuildLog(failMsg, 'error');
           throw new Error(failMsg);
@@ -3877,7 +3877,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         const tempPromptFile = path.join(actualProjectPath, '.cursor-fix-prompt.tmp');
         await fs.writeFile(tempPromptFile, fixPrompt, 'utf-8');
 
-        const modelArg = model || 'composer-1.5';
+        const modelArg = model || 'auto';
         let command: string;
         if (isWindows) {
           const wslProjectPath = actualProjectPath
@@ -3949,6 +3949,8 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
     onBuildLog?: (message: string, level?: 'info' | 'error') => void | Promise<void>,
     cursorApiKey?: string,
   ): Promise<{ stdout: string; stderr: string; logs: Array<{ timestamp: string; type: string; message: string; data?: any }> }> {
+    const INACTIVITY_TIMEOUT_MS = 90_000; // 90s of no output = stalled
+
     return new Promise((resolve, reject) => {
       let stdout = '';
       let stderr = '';
@@ -4041,29 +4043,42 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         env: spawnEnv,
       });
       
-      // Set up timeout
-      const timeoutHandle = setTimeout(() => {
+      // ── Kill helper shared by both timeout paths ──
+      const killProcess = (reason: string) => {
+        if (timedOut) return; // already handled
         timedOut = true;
-        const msg = 'Cursor-agent timed out, terminating process...';
-        console.log(`[MCP Server] âš  ${msg}`);
-        addLog('warning', msg);
-        
-        // Capture partial work before terminating
+        console.log(`[MCP Server] ${reason}`);
+        addLog('warning', reason);
         addLog('info', 'Capturing partial work before timeout termination');
-        
         childProcess.kill('SIGTERM');
-        
-        // Give it a moment to clean up, then force kill if needed
         setTimeout(() => {
           if (!childProcess.killed) {
             childProcess.kill('SIGKILL');
             addLog('warning', 'Force killed cursor-agent process');
           }
         }, 5000);
+      };
+
+      // Set up hard wall-clock timeout
+      const timeoutHandle = setTimeout(() => {
+        killProcess('Cursor-agent timed out (hard timeout), terminating process...');
       }, timeout);
-      
+
+      // Set up inactivity timeout — resets on every stdout/stderr data event
+      let inactivityHandle = setTimeout(() => {
+        killProcess(`Cursor-agent stalled — no output for ${INACTIVITY_TIMEOUT_MS / 1000}s. Killing.`);
+      }, INACTIVITY_TIMEOUT_MS);
+
+      const resetInactivityTimer = () => {
+        clearTimeout(inactivityHandle);
+        inactivityHandle = setTimeout(() => {
+          killProcess(`Cursor-agent stalled — no output for ${INACTIVITY_TIMEOUT_MS / 1000}s. Killing.`);
+        }, INACTIVITY_TIMEOUT_MS);
+      };
+
       // Process stdout line by line for JSON streaming
       childProcess.stdout?.on('data', (data: Buffer) => {
+        resetInactivityTimer();
         const text = data.toString();
         stdout += text;
         stdoutBuffer += text;
@@ -4173,6 +4188,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       
       // Capture stderr
       childProcess.stderr?.on('data', (data: Buffer) => {
+        resetInactivityTimer();
         const text = data.toString();
         stderr += text;
         
@@ -4188,6 +4204,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       // Handle process completion
       childProcess.on('close', (code, signal) => {
         clearTimeout(timeoutHandle);
+        clearTimeout(inactivityHandle);
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         flushAssistantBuffer(elapsed);
         
@@ -4270,6 +4287,8 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       command = `cd '${actualProjectPath}' && claude -p "$(cat .claude-prompt.tmp)" --output-format stream-json --verbose --max-turns 25 --model ${modelArg} --allowedTools '${allowedTools}'`;
     }
 
+    const INACTIVITY_TIMEOUT_MS = 90_000; // 90s of no output = stalled
+
     return new Promise((resolve, reject) => {
       let stdout = '';
       let stderr = '';
@@ -4329,11 +4348,12 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         env: spawnEnv,
       });
 
-      const timeoutHandle = setTimeout(() => {
+      // ── Kill helper shared by both timeout paths ──
+      const killProcess = (reason: string) => {
+        if (timedOut) return;
         timedOut = true;
-        const msg = 'Claude Code timed out, terminating process...';
-        console.log(`[MCP Server] âš  ${msg}`);
-        addLog('warning', msg);
+        console.log(`[MCP Server] ${reason}`);
+        addLog('warning', reason);
         childProcess.kill('SIGTERM');
         setTimeout(() => {
           if (!childProcess.killed) {
@@ -4341,9 +4361,26 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
             addLog('warning', 'Force killed Claude Code process');
           }
         }, 5000);
+      };
+
+      const timeoutHandle = setTimeout(() => {
+        killProcess('Claude Code timed out (hard timeout), terminating process...');
       }, timeout);
 
+      // Inactivity timeout — resets on every stdout/stderr data event
+      let inactivityHandle = setTimeout(() => {
+        killProcess(`Claude Code stalled — no output for ${INACTIVITY_TIMEOUT_MS / 1000}s. Killing.`);
+      }, INACTIVITY_TIMEOUT_MS);
+
+      const resetInactivityTimer = () => {
+        clearTimeout(inactivityHandle);
+        inactivityHandle = setTimeout(() => {
+          killProcess(`Claude Code stalled — no output for ${INACTIVITY_TIMEOUT_MS / 1000}s. Killing.`);
+        }, INACTIVITY_TIMEOUT_MS);
+      };
+
       childProcess.stdout?.on('data', (data: Buffer) => {
+        resetInactivityTimer();
         const text = data.toString();
         stdout += text;
         stdoutBuffer += text;
@@ -4431,6 +4468,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
       });
 
       childProcess.stderr?.on('data', (data: Buffer) => {
+        resetInactivityTimer();
         const text = data.toString();
         stderr += text;
         const lines = text.split('\n').filter((l: string) => l.trim());
@@ -4443,6 +4481,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
 
       childProcess.on('close', (code, signal) => {
         clearTimeout(timeoutHandle);
+        clearTimeout(inactivityHandle);
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         flushAssistantBuffer(elapsed);
 
@@ -7251,6 +7290,20 @@ module.exports = {
       console.error(`  POST   http://${host}:${port}/api/sessions/:id/stop`);
       if (process.env.MCP_USE_BUILD_WORKERS === 'true') {
         console.error(`  [Worker mode ENABLED] Each build spawns an isolated worker process`);
+
+        // Start liveness monitor for worker builds (detects stalled workers via heartbeat)
+        const svcKey = process.env.MCP_SUPABASE_SERVICE_ROLE_KEY?.trim();
+        const sbUrl = process.env.SUPABASE_URL?.trim();
+        const sbAnon = process.env.SUPABASE_ANON_KEY?.trim();
+        if (svcKey && sbUrl) {
+          const monitorClient = createClient(sbUrl, svcKey, { auth: { autoRefreshToken: false, persistSession: false } });
+          this.buildOrchestrator.startLivenessMonitor(monitorClient);
+          console.error(`  [Liveness monitor ACTIVE] Checking worker heartbeats every 60s`);
+        } else if (sbUrl && sbAnon) {
+          const monitorClient = createClient(sbUrl, sbAnon, { auth: { autoRefreshToken: false, persistSession: false } });
+          this.buildOrchestrator.startLivenessMonitor(monitorClient);
+          console.error(`  [Liveness monitor ACTIVE] Checking worker heartbeats every 60s (anon key)`);
+        }
       }
     });
   }

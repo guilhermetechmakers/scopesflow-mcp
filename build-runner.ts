@@ -65,6 +65,26 @@ export interface BuildExecutePromptArgs {
 export type CreateProjectFn = (config: BuildCursorConfig) => Promise<unknown>;
 export type ExecutePromptFn = (args: BuildExecutePromptArgs) => Promise<unknown>;
 
+/**
+ * Safety-net timeout wrapper for any promise.
+ * If the promise doesn't resolve/reject within `ms`, rejects with a descriptive error.
+ * Exported so agent runners can reuse it.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`[BuildRunner] Prompt execution timed out after ${ms / 1000}s (${label})`));
+    }, ms);
+    promise.then(
+      (result) => { clearTimeout(timer); resolve(result); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
+/** Buffer added on top of the step timeout so the MCP server's internal timeout fires first. */
+const RUNNER_TIMEOUT_BUFFER_MS = 60_000;
+
 /** Parsed result from executePromptFn (extracted from MCP content[0].text). */
 export interface ExecutePromptResult {
   success: boolean;
@@ -833,7 +853,11 @@ export async function runBuildLoop(
           if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
         }
 
-        const rawResult = await executePromptFn(executeArgs);
+        const rawResult = await withTimeout(
+          executePromptFn(executeArgs),
+          timeoutPerStep + RUNNER_TIMEOUT_BUFFER_MS,
+          `step ${currentStep}`,
+        );
         execResult = parseMcpResult(rawResult);
 
         if (execResult.success) break;
@@ -1068,7 +1092,11 @@ export async function runBuildLoop(
           if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
         }
 
-        const rawResult = await executePromptFn(executeArgs);
+        const rawResult = await withTimeout(
+          executePromptFn(executeArgs),
+          timeoutPerStep + RUNNER_TIMEOUT_BUFFER_MS,
+          `agent loop ${agentLoopCount}`,
+        );
         const execResult = parseMcpResult(rawResult);
 
         if (stepRowId) {
@@ -1284,7 +1312,11 @@ export async function runBuildLoop(
             if (githubAuth.gitUserEmail) executeArgs.gitUserEmail = githubAuth.gitUserEmail;
           }
 
-          const rawResult = await executePromptFn(executeArgs);
+          const rawResult = await withTimeout(
+            executePromptFn(executeArgs),
+            timeoutPerStep + RUNNER_TIMEOUT_BUFFER_MS,
+            `feedback step ${feedbackStep}`,
+          );
           execResult = parseMcpResult(rawResult);
 
           if (execResult.success) break;
