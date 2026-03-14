@@ -718,9 +718,11 @@ export async function runBuildLoop(
       cfgObj.model;
     let model = typeof rawModel === 'string' && rawModel.trim().length > 0 ? rawModel.trim() : undefined;
 
-    // Timeout per step from automationSettings or default 5 min
-    const timeoutPerStep =
-      ((configuration as { automationSettings?: { timeoutPerStep?: number } }).automationSettings?.timeoutPerStep) ?? 600000;
+    // Timeout per step from automationSettings (with 10-min floor to prevent premature kills)
+    const MIN_TIMEOUT_PER_STEP_MS = 600_000; // 10 min floor — first prompt scaffolding often takes 7-10 min
+    const rawTimeoutPerStep =
+      ((configuration as { automationSettings?: { timeoutPerStep?: number } }).automationSettings?.timeoutPerStep) ?? MIN_TIMEOUT_PER_STEP_MS;
+    const timeoutPerStep = Math.max(rawTimeoutPerStep, MIN_TIMEOUT_PER_STEP_MS);
 
     if (activeBuildTracker && !activeBuildTracker.has(buildId)) {
       activeBuildTracker.set(buildId, {

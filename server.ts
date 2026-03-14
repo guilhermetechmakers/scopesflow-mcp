@@ -1914,7 +1914,7 @@ When implementing this project:
       console.log(`[MCP Server] Executing prompt via ${cliLabel}`);
       console.log(`[MCP Server] Project: ${args.projectPath}`);
       console.log(`[MCP Server] Prompt preview: ${args.prompt.substring(0, 200)}...`);
-      console.log(`[MCP Server] Timeout: ${args.timeout || 600000}ms`);
+      console.log(`[MCP Server] Timeout: ${Math.max(args.timeout || 600000, 600000)}ms`);
       console.log(`[MCP Server] Retry count: ${args.retryCount || 0}`);
       console.log(`[MCP Server] Is retry: ${args.isRetry || false}`);
       console.log(`[MCP Server] ========================================`);
@@ -2660,13 +2660,17 @@ Analyze the existing project structure and implement the task following the patt
           }
         : undefined;
 
+      // Enforce 10-min floor on agent timeout (DB automationSettings may have lower legacy values)
+      const MIN_AGENT_TIMEOUT_MS = 600_000;
+      const effectiveTimeout = Math.max(args.timeout || MIN_AGENT_TIMEOUT_MS, MIN_AGENT_TIMEOUT_MS);
+
       try {
         if (args.provider === 'claude-code') {
           console.log(`[MCP Server] Using Claude Code provider`);
           const result = await this.executeClaudeCodeStreaming(
             directivePrompt,
             actualProjectPath,
-            args.timeout || 600000,
+            effectiveTimeout,
             onBuildLog,
             args.model,
             args.claudeApiKey,
@@ -2679,7 +2683,7 @@ Analyze the existing project structure and implement the task following the patt
           const result = await this.executeCursorAgentStreaming(
             command,
             isWindows ? undefined : actualProjectPath,
-            args.timeout || 600000,
+            effectiveTimeout,
             onBuildLog,
             effectiveCursorApiKey,
           );
