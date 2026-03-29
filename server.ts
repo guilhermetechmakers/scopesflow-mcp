@@ -16,6 +16,9 @@ import { BuildOrchestrator, type WorkerSession } from './build-orchestrator.js';
 // Load environment variables (optional now, not required for Cursor CLI)
 dotenv.config();
 
+/** Default `cursor-agent --model` when callers omit `model`. */
+const DEFAULT_CURSOR_AGENT_MODEL = 'composer-2';
+
 const execAsync = promisify(exec);
 
 interface CursorProjectConfig {
@@ -59,7 +62,7 @@ interface ExecutePromptArgs {
   supabaseClient?: SupabaseClient; // NEW: Optional Supabase client for fetching GitHub auth
   userId?: string;           // NEW: Optional user ID for fetching GitHub auth
   buildId?: string;          // NEW: When set, server appends to build_logs for realtime following
-  model?: string;            // NEW: Model to use for cursor-agent (defaults to "auto")
+  model?: string;            // NEW: Model to use for cursor-agent (defaults to composer-2)
   cursorApiKey?: string;     // NEW: Per-user Cursor API key (passed to cursor-agent via env var)
   promptId?: string;         // NEW: Flowchart prompt ID â€” included in mcp_log for correct marking on completion
   provider?: 'cursor' | 'claude-code'; // AI provider: cursor-agent or claude CLI
@@ -2617,8 +2620,8 @@ Analyze the existing project structure and implement the task following the patt
         const wslPromptFile = wslProjectPath + '/.cursor-prompt.tmp';
         
         // Use --print flag for non-interactive mode, --force to allow commands
-        // Available models: auto, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
-        const modelArg = args.model || 'auto';
+        // Available models: auto, composer-2, sonnet-4.5, sonnet-4.5-thinking, gpt-5, opus-4.1, grok, gemini-3-pro, composer-1.5
+        const modelArg = args.model || DEFAULT_CURSOR_AGENT_MODEL;
         // Per-user key only (no server fallback)
         const effectiveKey = effectiveCursorApiKey || '';
         // Use export inside the bash -c string (single-quoted value) instead of --api-key "..." because
@@ -2630,7 +2633,7 @@ Analyze the existing project structure and implement the task following the patt
         const tempPromptFile = path.join(actualProjectPath, '.cursor-prompt.tmp');
         await fs.writeFile(tempPromptFile, directivePrompt, 'utf-8');
         
-        const modelArg = args.model || 'auto';
+        const modelArg = args.model || DEFAULT_CURSOR_AGENT_MODEL;
         command = `cat .cursor-prompt.tmp | cursor-agent --print --output-format stream-json --stream-partial-output --force --model ${modelArg}`;
       }
       
@@ -3881,7 +3884,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
         const tempPromptFile = path.join(actualProjectPath, '.cursor-fix-prompt.tmp');
         await fs.writeFile(tempPromptFile, fixPrompt, 'utf-8');
 
-        const modelArg = model || 'auto';
+        const modelArg = model || DEFAULT_CURSOR_AGENT_MODEL;
         let command: string;
         if (isWindows) {
           const wslProjectPath = actualProjectPath
@@ -4277,7 +4280,7 @@ Fix all errors now. Do not add new features, only fix the existing errors.`;
 
     // Map model to a valid Claude CLI model. 'auto' is a Cursor-specific value
     // and not recognized by the Claude CLI, so default to 'opus'.
-    const INVALID_CLAUDE_MODELS = new Set(['auto', 'composer-1.5', 'gpt-5', 'grok', 'gemini-3-pro']);
+    const INVALID_CLAUDE_MODELS = new Set(['auto', 'composer-1.5', 'composer-2', 'gpt-5', 'grok', 'gemini-3-pro']);
     const modelArg = (model && !INVALID_CLAUDE_MODELS.has(model)) ? model : 'opus';
     const allowedTools = 'Bash,Read,Edit,Write,MultiEdit,Glob,Grep';
     let command: string;
